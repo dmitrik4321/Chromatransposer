@@ -1,0 +1,18 @@
+# Пример generic-адаптера под «ещё одну прослойку» без написания кода
+- device_id: lamp-desk
+  name: Настольная лапша
+  transport: mqtt
+  base_topic: custom-lamp/kitchen
+  topology: {kind: strip, length: 32}
+  state_map:
+    power: on
+    dim: brightness
+    prog: effect
+  command_map:
+    on: power
+    brightness: dim
+    effect: prog
+  ir_endpoint: null            # прошивка IR не ест — всё через трансляцию
+  segment_params: {offset: from, length: count}
+  telemetry_map: {mic.level: audio_level}
+  poll_interval: 5

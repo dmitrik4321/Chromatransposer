@@ -1,0 +1,58 @@
+# Chromatransposer server — конфиг как код (версионируется в репо)
+
+mqtt:
+  host: 127.0.0.1        # только ЛОКАЛЬНЫЙ брокер, облако не используется
+  port: 1883
+
+state_dir: state
+
+sync:
+  tick_hz: 5             # общий тик стендов (решение B), дрейф <50 мс допустим
+
+adapters:
+  - type: wled
+    hosts:               # дополняется mDNS-дискавери (_wled._tcp)
+      - 192.168.1.40
+  - type: gyverhub
+    base_topics:         # схема GyverHub -> канон ct/v1 маппится адаптером
+      matrix-wall: gyvermatrix/room1
+      lamp-desk:   gyverlamp/desk
+      garland-v3:  garland/livingroom
+    http_hosts:
+      matrix-wall: http://192.168.1.41
+  - type: native_ct
+    devices:
+      strip-corridor:
+        topology: {kind: strip, length: 120, color_order: GRB}
+        telemetry: [audio_level, audio_band]
+      matrix-mini:
+        name: Мини-матрица 8x8
+        topology: {kind: matrix, width: 8, height: 8}
+  # generic-«лапша» вынесена в configs/generic/*.yaml
+
+groups:
+  - id: wall
+    name: Стена из двух матриц
+    pattern: ["matrix-*"]
+    sync: true
+    canvas_length: 512
+    segments:
+      matrix-wall: {device_id: matrix-wall, start: 0, length: 256, canvas_offset: 0}
+      matrix-mini: {device_id: matrix-mini, start: 0, length: 64, canvas_offset: 256}
+
+scenes:
+  - id: evening
+    name: Вечерний режим
+    steps:
+      - group: wall
+        ir: {"class": perlin, "params": {"speed": 0.2, "brightness": 0.4},
+             "palette": {"stops": [{"pos": 0, "color": "#ff8800"},
+                                    {"pos": 1, "color": "#330066"}]}}
+      - device: strip-corridor
+        state: {on: true, bri: 60}
+
+schedules:
+  - id: eve-1930
+    scene_id: evening
+    cronish: "daily 19:30"
+    enabled: true
