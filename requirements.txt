@@ -4,6 +4,7 @@ pydantic>=2.11
 PyYAML>=6.0
 rich>=14.0
 paho-mqtt>=2.1
+amqtt>=0.11              # встроенный MQTT-брокер (прослойка сама поднимает MQTT)
 requests>=2.31
 aiohttp>=3.9
 zeroconf>=0.130

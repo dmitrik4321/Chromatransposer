@@ -1,8 +1,21 @@
 # Chromatransposer server — конфиг как код (версионируется в репо)
 
 mqtt:
-  host: 127.0.0.1        # только ЛОКАЛЬНЫЙ брокер, облако не используется
+  host: 127.0.0.1        # только ЛОКАЛЬНЫЙ брокер, облако не используется (решение D)
   port: 1883
+  broker:                # прослойка сама поднимает MQTT (встроенный AMQTT-брокер)
+    enabled: true        # false -> использовать внешний Mosquitto ниже
+    bind: 0.0.0.0:1883   # LAN: ESP-устройства подключаются к этому брокеру
+
+homeassistant:           # прослойка сама поднимает HA (требование)
+  mode: embedded         # embedded | external | off
+  container: chromatransposer-ha
+  image: homeassistant/home-assistant:latest
+  port: 8123
+  startup_timeout_s: 90
+  discovery:             # штатный HA MQTT-discovery; исходники HA не трогаем
+    enabled: true
+    prefix: homeassistant
 
 state_dir: state
 

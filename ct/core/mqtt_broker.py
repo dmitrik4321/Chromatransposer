@@ -60,7 +60,11 @@ class EmbeddedBroker:
             "listeners": {"default": {                       # имя обязательное
                 "type": "tcp",
                 "bind": self.cfg["bind"],
-                "max_inflight_messages": self.cfg["max_inflight_messages"],
+                # ВНИМАНИЕ (проверено на amqtt 0.12): max_inflight НЕ является
+                # полем листенера — dacite падает с UnexpectedDataError.
+                # Задаём его только если секция явно разрешена конфигом.
+                **({"max_inflight_messages": self.cfg["max_inflight_messages"]}
+                   if self.cfg.get("_listener_max_inflight") else {}),
             }},
             "sys_interval": self.cfg["sys_interval_s"],
             "auth": {

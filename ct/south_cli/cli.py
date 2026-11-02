@@ -38,6 +38,7 @@ HELP = """
   reconcile                      desired vs reported, правка дрейфа
   telemetry                      последние данные сенсоров (звук и т.п.)
   release <device>               снять админ-захват
+  status                         сервер + MQTT-брокер + HA (режим/ready/ошибка)
   provision window devices|tokens on|off
   provision usb <device_id> <ssid> <wifi_pass>   (только --local)
   token issue <caller> user|admin
@@ -148,6 +149,18 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
     elif cmd == "telemetry":
         _pj(client.get("/api/v1/telemetry") if client
             else local_server.telemetry_latest)
+    elif cmd == "status":
+        st = (client.get("/api/v1/status") if client
+              else {"ok": True, **local_server.infra_status()})
+        brk, ha = st["mqtt_broker"], st["homeassistant"]
+        console.print(f"MQTT: {'встроенный' if brk['embedded'] else 'внешний'} "
+                      f"[{'green' if brk['running'] else 'red'}]"
+                      f"{'работает' if brk['running'] else 'НЕ работает'}[/] ({brk['bind']})")
+        mark = "[green]готов[/]" if ha["ready"] else "[yellow]не готов[/]"
+        console.print(f"HA: режим={ha['mode']} {mark} url={ha['url']}"
+                      + (f" runtime={ha['runtime']}" if ha.get("runtime") else ""))
+        if ha.get("error"):
+            console.print(f"  [red]ошибка:[/] {ha['error']}")
     elif cmd == "release" and args:
         from ct.core.orchestrator import Caller
         if client:

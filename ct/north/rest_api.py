@@ -243,6 +243,13 @@ def telemetry(caller: Caller = Depends(get_caller)):
     return server.telemetry_latest
 
 
+@app.get("/api/v1/status")
+def status(caller: Caller = Depends(get_caller)):
+    """Состояние инфраструктуры: встроенный MQTT-брокер и HA (требование:
+    прослойка сама поднимает оба)."""
+    return {"ok": True, **server.infra_status()}
+
+
 # --- provisioning ------------------------------------------------------------
 @app.post("/api/v1/provision/windows")
 def provision_window(body: WindowBody):

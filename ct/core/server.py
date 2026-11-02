@@ -18,6 +18,7 @@ from ct.adapters import ADAPTERS
 from ct.adapters.base import SouthboundAdapter, UnsupportedError
 from ct.core.auth import Provisioning
 from ct.core.ha_bridge import HaBridge
+from ct.core.ha_discovery import HaDiscoveryExporter
 from ct.core.ir import EffectIR, NativeRef, PortResult, Segment
 from ct.core.mqtt_bridge import MqttBridge
 from ct.core.mqtt_broker import EmbeddedBroker
@@ -68,6 +69,19 @@ class Server:
         self.config = {**SERVER_CONFIG, **self._load_config(config_path)}
         self.registry = Registry()
         self.bridge: Optional[MqttBridge] = None
+        # инфраструктурные сервисы (решение D + требование «сама поднимает»):
+        self.broker = EmbeddedBroker(self.config.get("mqtt", {}).get("broker", {}))
+        ha_cfg = dict(self.config.get("homeassistant", {}))
+        if not self.broker.cfg.get("enabled", True):
+            # внешний брокер: HA должен смотреть в него, а не на 127.0.0.1 внутри контейнера
+            mcfg = self.config.get("mqtt", {})
+            ha_cfg.setdefault("mqtt_bind", f"{mcfg.get('host', '127.0.0.1')}:{mcfg.get('port', 1883)}")
+        else:
+            ha_cfg.setdefault("mqtt_bind", self.broker.cfg["bind"])
+        self.ha = HaBridge(ha_cfg)
+        self.discovery: Optional[HaDiscoveryExporter] = None
+        self._ha_task: Optional[asyncio.Task] = None
+        self._stopping = False
         self.provisioning = Provisioning(self.config.get("state_dir", "state"))
         self.queue = CommandQueue()
         self.orchestrator = Orchestrator(self.registry, self._apply)
@@ -83,12 +97,20 @@ class Server:
 
     # --- запуск ------------------------------------------------------------------
     async def start(self) -> None:
+        # 1) встроенный MQTT-брокер (решение D): прослойка сама поднимает MQTT.
+        await self.broker.start()
+
         # транслятор: карты/шкалы/лестница деградации из YAML (без хардкода)
         configure_translator(self.config.get("translator", {}))
 
         mqtt_cfg = self.config.get("mqtt", {})
-        self.bridge = MqttBridge(mqtt_cfg.get("host", "127.0.0.1"),
-                                 mqtt_cfg.get("port", 1883))
+        # если брокер встроенный — клиент моста идёт на фактический bind-адрес
+        # (тесты/несколько инстансов могут использовать нестандартный порт)
+        host, port = mqtt_cfg.get("host", "127.0.0.1"), mqtt_cfg.get("port", 1883)
+        if self.broker.running:
+            bhost, _, bport = self.broker.cfg["bind"].rpartition(":")
+            host, port = (bhost or "127.0.0.1"), int(bport)
+        self.bridge = MqttBridge(host, port)
         await self.bridge.connect()
         await self.bridge.publish_lwt("ct/v1/server/available")
         await self.bridge.publish("ct/v1/server/available",
@@ -109,10 +131,11 @@ class Server:
                                         self._make_state_cb(node.id))
 
         # нормализация входящих телеметрий-топиков экосистем в канон
-        self.bridge.on("ct/v1/#/telemetry/#", self._on_telemetry)
+        self.bridge.on("ct/v1/+/telemetry/#", self._on_telemetry)  # + ровно один уровень: # в середине запрещён MQTT
 
         tick_hz = self.config.get("sync", {}).get("tick_hz", 5)
-        await self.orchestrator.start_tick(1.0 / tick_hz)
+        if tick_hz > 0:                      # 0 — тик выключен конфигом
+            await self.orchestrator.start_tick(1.0 / tick_hz)
 
         for g in self.config.get("groups", []):
             self.orchestrator.groups[g["id"]] = Group(**g)
@@ -121,6 +144,50 @@ class Server:
         for sc in self.config.get("schedules", []):
             self.orchestrator.schedules[sc["id"]] = Schedule(**sc)
         self._recon_task = asyncio.create_task(self._reconcile_loop())
+
+        # 2) HA: discovery-экспорт + фоновый подъём контейнера (не блокирует старт).
+        self.discovery = HaDiscoveryExporter(
+            self.bridge, self.registry,
+            self.config.get("homeassistant", {}).get("discovery"))
+        await self.discovery.publish_all()
+        if self.config.get("homeassistant", {}).get("mode", "embedded") != "off":
+            self._ha_task = asyncio.create_task(self._ha_bootstrap())
+
+    async def _ha_bootstrap(self) -> None:
+        """HA поднимается фоном с retry: ядро не должно ждать/падать из-за него.
+
+        Ждём readiness урывками и реагируем на отмену — иначе `stop()` висел бы
+        все startup_timeout_s в executor-потоке (проверено тестами).
+        """
+        deadline_s = self.config.get("homeassistant", {}).get("startup_timeout_s", 90)
+        try:
+            if await self.ha.ensure_running():
+                ok = await self._wait_ready_cancellable(deadline_s)
+            else:
+                ok = False
+            if not ok and not self._stopping:
+                # одна повторная попытка после паузы (допустим, докер ещё не поднялся)
+                await asyncio.sleep(min(deadline_s, 15))
+                await self.ha.ensure_running()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:                       # не роняем сервер из-за HA
+            self.ha.last_error = f"bootstrap: {e}"
+
+    async def _wait_ready_cancellable(self, deadline_s: float) -> bool:
+        waited = 0.0
+        while waited < deadline_s and not self._stopping:
+            ready = asyncio.ensure_future(
+                asyncio.get_running_loop().run_in_executor(None, self.ha._probe_sync))
+            done, _ = await asyncio.wait({ready}, timeout=2)
+            if done and ready.result():
+                return True
+            if not done:
+                ready.cancel()
+            await asyncio.sleep(2)
+            waited += 2
+        self.ha.last_error = f"HA не поднялся за {deadline_s}s"
+        return False
 
     @staticmethod
     def _load_generic_configs(directory: str) -> list[dict]:
@@ -215,9 +282,25 @@ class Server:
         raise KeyError(f"no adapter '{node.adapter}' loaded")
 
     async def stop(self) -> None:
+        self._stopping = True
         recon = getattr(self, "_recon_task", None)
         if recon:
             recon.cancel()
+        ha_task = getattr(self, "_ha_task", None)
+        if ha_task:
+            ha_task.cancel()
         await self.orchestrator.stop_tick()
         if self.bridge:
             await self.bridge.close()
+        # брокер — часть этого процесса: останавливаем последним, чтобы
+        # bridge/LWT-«offline» успели уйти в шину
+        await self.broker.stop()
+
+    def infra_status(self) -> dict:
+        """Состояние инфраструктурных сервисов для /status (CLI и REST)."""
+        return {
+            "mqtt_broker": {"embedded": self.broker.cfg.get("enabled", True),
+                            "running": self.broker.running,
+                            "bind": self.broker.cfg["bind"]},
+            "homeassistant": self.ha.status(),
+        }
