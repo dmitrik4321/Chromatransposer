@@ -16,7 +16,8 @@ from ct.core.ir import NativeRef, Topology
 
 class Ecosystem(str, Enum):
     WLED = "wled"
-    GYVERHUB = "gyverhub"     # GyverMatrix / GyverLamp / гирлянда v3
+    GYVERHUB = "gyverhub"     # конструктор UI: MQTT, виджеты (GyverMatrix и самодельные)
+    GYVERLAMP2 = "gyverlamp2" # стоковая GyverLamp2: UDP «GL» (протокол описан smeleshkin/GyverLamp2HA)
     GENERIC = "generic"       # HTTP/MQTT/UDP + конфиг маппинга
     NATIVE_CT = "native_ct"   # собственная прошивка-IR-интерпретатор
 

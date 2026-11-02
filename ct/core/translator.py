@@ -39,8 +39,25 @@ WLED_MAP: dict[str, EffectClass] = {
     "gradient": EffectClass.COLORSWOKE,
 }
 
+# Стоковая прошивка AlexGyver/GyverLamp2 (данные сообщества: smeleshkin/GyverLamp2HA):
+# ровно 10 эффектов — perlin, color, cycle, gradient, particles, fire, fire2020,
+# confetti, tornado, clock. Остальное — честный unsupported или деградация.
+GYVERLAMP2_MAP: dict[str, EffectClass] = {
+    "perlin": EffectClass.PERLIN,
+    "color": EffectClass.STATIC,
+    "cycle": EffectClass.COLORSWOKE,
+    "gradient": EffectClass.COLORSWOKE,
+    "particles": EffectClass.TWINKLE,     # приблизительное соответствие: мерцание частиц (декларируется)
+    "fire": EffectClass.FIRE,
+    "fire2020": EffectClass.FIRE,
+    "confetti": EffectClass.TWINKLE,      # приблизительное соответствие
+    "tornado": EffectClass.CUSTOM,        # матричный вихрь — топология-привязанный
+    "clock": EffectClass.CUSTOM,          # дисплей-эффект, не переносится 1:1
+}
+
+# GyverHub — конструктор UI: набор эффектов зависит от скетча пользователя,
+# поэтому карта ниже лишь типовые имена из примеров Gyver (уточняется по YAML).
 GYVER_MAP: dict[str, EffectClass] = {
-    # типичные имена GyverHub-прошивок; уточняется по факту прошивок
     "noise": EffectClass.PERLIN,
     "perlin": EffectClass.PERLIN,
     "plasma": EffectClass.PLASMA,
@@ -61,11 +78,32 @@ NATIVE_CT_MAP: dict[str, EffectClass] = {c.value: c for c in EffectClass}
 ECOSYSTEM_MAPS: dict[str, dict[str, EffectClass]] = {
     "wled": WLED_MAP,
     "gyverhub": GYVER_MAP,
+    "gyverlamp2": GYVERLAMP2_MAP,
     "native_ct": NATIVE_CT_MAP,
 }
 
-# Классы, требующие матричной топологии.
-MATRIX_ONLY = {EffectClass.FIRE, EffectClass.RAIN, EffectClass.PLASMA}
+# Классы, требующие матричной топологии, ПО ФАКТУ конкретных прошивок
+# (сверено с GyverLamp2HA/smeleshkin: fire/fire2020/particles/confetti и cycle
+#  стоковая лампа рисует на 1D-кольце; а вот tornado/clock — матричные).
+MATRIX_ONLY_BY_ECOSYSTEM: dict[str, set] = {
+    "gyverlamp2": {EffectClass.CUSTOM},   # tornado/clock помечены custom+matrix ниже
+    "wled": set(),                        # WLED сам решает, что деградировать
+    "gyverhub": set(),
+}
+MATRIX_ONLY_DEFAULT = {EffectClass.FIRE, EffectClass.PLASMA, EffectClass.RAIN}
+# Исключения по факту прошивок: стоковая GyverLamp2 рисует огонь/цикл/радугу
+# процедурно на 1D-кольце — для неё эти классы НЕ топологически привязаны.
+TOPOLOGY_EXEMPT: dict[str, set] = {
+    "gyverlamp2": {EffectClass.FIRE, EffectClass.COLORSWOKE, EffectClass.RAINBOW},
+}
+
+
+def _matrix_only(ir_class: EffectClass, ecosystem: str) -> bool:
+    if ecosystem == "gyverlamp2":
+        if ir_class is EffectClass.CUSTOM:
+            return True                   # tornado/clock — только матрица, 1:1 нет
+        return ir_class in (MATRIX_ONLY_DEFAULT - TOPOLOGY_EXEMPT["gyverlamp2"])
+    return ir_class in MATRIX_ONLY_DEFAULT
 
 
 def _norm(v: float, lo: float, hi: float) -> float:
@@ -94,11 +132,18 @@ def native_to_ir(ref: NativeRef, args: Optional[dict] = None) -> EffectIR:
         params.scale = _norm(float(a.get("fx", a.get("size", 128))), 0, 255)
         params.brightness = _norm(float(a.get("bri", a.get("brightness", 255))), 0, 255)
     elif ref.ecosystem == "gyverhub":
-        # Gyver-шкалы условно 0..100 (уточняется под конкретные прошивки)
+        # GyverHub-скетч: шкалы задаёт автор прошивки; дефолт — проценты 0..100
         params.speed = _norm(float(a.get("speed", 50)), 0, 100)
         params.density = _norm(float(a.get("density", a.get("amount", 50))), 0, 100)
         params.scale = _norm(float(a.get("scale", 50)), 0, 100)
         params.brightness = _norm(float(a.get("bright", a.get("brightness", 100))), 0, 100)
+    elif ref.ecosystem == "gyverlamp2":
+        # GyverLamp2: speed/scale/bright — байты 0..255 (проверено по протоколу GL)
+        params.speed = _norm(float(a.get("speed", 128)), 0, 255)
+        params.scale = _norm(float(a.get("scale", 128)), 0, 255)
+        params.brightness = _norm(float(a.get("bright", 255)), 0, 255)
+        if int(a.get("sound_react", 1)) != 1:
+            losses.append("soundReact выключен — реакция на звук теряется при чтении")
     else:
         for k in ("speed", "scale", "density", "blur", "brightness"):
             if k in a:
@@ -127,6 +172,15 @@ def _palette_from_native(ecosystem: str, a: dict) -> Palette:
         if isinstance(pal, list):
             n = max(1, len(pal) - 1)
             stops = [ColorStop(pos=i / n, color=c) for i, c in enumerate(pal)]
+    elif ecosystem == "gyverlamp2":
+        # палитра прошивки — встроенный id 2..32, стопы неизвестны наружу:
+        # сохраняем имя; конвертер обязан честно декларировать потерю градиента
+        from ct.adapters.gyverlamp2_protocol import palette_name, PALETTE_FIRST_ID
+        pid = a.get("palette", a.get("pal"))
+        if isinstance(pid, int):
+            return Palette(name=palette_name(pid), stops=[])
+        if isinstance(pid, str):
+            return Palette(name=pid, stops=[])
     return Palette(stops=stops)
 
 
@@ -147,17 +201,24 @@ def ir_to_native(ir: EffectIR, target: DeviceNode) -> PortResult:
                           notes=["direct IR"])
 
     # 2. Топологические потери: матричный эффект на ленту и наоборот.
-    if ir.class_ in MATRIX_ONLY and not target.topology.is_matrix:
+    if _matrix_only(ir.class_, target.ecosystem.value) and not target.topology.is_matrix:
         notes.append(f"'{ir.class_.value}' is topology-bound; degraded for strip")
         return _degrade(ir, target, reverse, notes)
     if target.topology.is_matrix and ir.class_ is EffectClass.RAIN:
         notes.append("rain on matrix: 1D projection, spatial losses declared")
 
     # 3. Прямое соответствие классу.
-    native_name = reverse.get(ir.class_)
+    # кандидаты: нативные имена цели, объявленные в её capabilities
+    candidates = [k for k, v in tgt_map.items()
+                  if v is ir.class_ and (not target.native_effects
+                                         or k in target.effect_names())]
+    native_name = candidates[0] if candidates else None
     if native_name:
         args = _encode_params(ir.params, target.ecosystem.value)
-        args.update(_encode_palette(ir.palette, target.ecosystem.value))
+        pal_enc = _encode_palette(ir.palette, target.ecosystem.value)
+        if "_loss" in pal_enc:               # не_builtin палитра -> декларация, а не ключ в args
+            notes.append(pal_enc.pop("_loss"))
+        args.update(pal_enc)
         return PortResult(ir=ir,
                           target_native=NativeRef(ecosystem=target.ecosystem.value,
                                                   effect=native_name, args=args),
@@ -172,12 +233,15 @@ def _degrade(ir: EffectIR, target: DeviceNode, reverse: dict, notes: list[str]) 
     fallback_order = [EffectClass.STATIC, EffectClass.BREATHING, EffectClass.COLORSWOKE]
     for fb in fallback_order:
         if fb in available and fb is not ir.class_:
+            deg_losses = [f"'{ir.class_.value}' -> '{fb.value}' composition"] + list(notes)
             deg = EffectIR(**{"class": EffectClass.COMPOSITION},
                            params=ir.params, palette=ir.palette,
-                           losses=[f"'{ir.class_.value}' -> '{fb.value}' composition"],
-                           origin=ir.origin)
+                           losses=deg_losses, origin=ir.origin)
             args = _encode_params(ir.params, target.ecosystem.value)
-            args.update(_encode_palette(ir.palette, target.ecosystem.value))
+            pal_enc = _encode_palette(ir.palette, target.ecosystem.value)
+            if "_loss" in pal_enc:
+                notes.append(pal_enc.pop("_loss"))
+            args.update(pal_enc)
             notes.append(f"degraded: {ir.class_.value} -> {fb.value}")
             return PortResult(ir=ir, degraded_to=deg,
                               target_native=NativeRef(ecosystem=target.ecosystem.value,
@@ -202,11 +266,26 @@ def _encode_params(params: EffectParams, ecosystem: str) -> dict:
             "scale": _denorm(params.scale, 0, 100),
             "bright": _denorm(params.brightness, 0, 100),
         }
+    if ecosystem == "gyverlamp2":
+        # режимы GL,2 — байтовые поля 0..255; density у лампы нет (потеря
+        # декларируется вызывающим через notes), hue кодируется отдельно
+        return {
+            "speed": _denorm(params.speed, 0, 255),
+            "scale": _denorm(params.scale, 0, 255),
+            "bright": max(1, _denorm(params.brightness, 0, 255)),
+        }
     return params.model_dump(exclude={"extra"})
 
 
 def _encode_palette(palette: Palette, ecosystem: str) -> dict:
     colors = [s.color for s in palette.stops]
+    if ecosystem == "gyverlamp2":
+        # прошивка принимает только id встроенной палитры 2..32 (стопы не шлются)
+        from ct.adapters.gyverlamp2_protocol import palette_id
+        try:
+            return {"palette": palette_id(palette.name or "rainbow")}
+        except ValueError:
+            return {"palette": 12, "_loss": f"palette '{palette.name}' not builtin; rainbow used"}
     if not colors:
         return {}
     if ecosystem == "wled":

@@ -1,11 +1,15 @@
-"""Адаптер GyverHub-семейства (GyverMatrix, GyverLamp, гирлянда v3).
+"""Адаптер GyverHub — MQTT-конструктор UI (AlexGyver/GyverHub).
 
-Транспорт: MQTT-топики схемы GyverHub + HTTP-эндпоинты где имеются.
-Схема GyverHub (уточняется под конкретные прошивки, маппится на канон ct/v1):
-  <base>/set            — команда (JSON или ключ=значение)
-  <base>/state          — состояние (retain)
-  <base>/available      — LWT online/offline
-  <base>/config         — конфигурация узла
+ВАЖНО (по реальным исходникам экосистемы): GyverHub — это фреймворк-конструктор
+веб-морды на ESP, где топики MQTT задаёт пользователь в скетче прошивки.
+Фиксированной схемы state/set/config НЕ СУЩЕСТВУЕТ: имена виджетов и топиков —
+произвольные. Поэтому адаптер работает по YAML-маппингу (base_topics +
+widget_map), а не по угаданной схеме:
+
+  widgets: {канон_поле: имя_топика_виджета}   # напр. brightness: "lamp/bri"
+
+Для стоковых прошивок семейства (GyverLamp2 и пр.) GyverHub не используется —
+см. отдельный адаптер gyverlamp2.py (UDP «GL»).
 Generic-вариант для «прочей лапши» — см. generic.py.
 """
 from __future__ import annotations
@@ -19,120 +23,115 @@ from ct.core.ir import EffectIR, NativeRef, Segment, Topology
 from ct.core.registry import (DeviceNode, Endpoint, Ecosystem, OnlineState,
                               TransportKind)
 
-GYVER_TO_CANON = {  # поля состояния GyverHub -> канонические имена
-    "power": "on",
-    "bright": "brightness",
-    "mode": "effect",
-    "speed": "speed",
-    "pal": "palette",
-}
-CANON_TO_GYVER = {v: k for k, v in GYVER_TO_CANON.items()}
-
 
 class GyverHubAdapter(SouthboundAdapter):
     name = "gyverhub"
     ecosystem = "gyverhub"
 
-    def __init__(self, base_topics: dict[str, str], bridge, http_hosts: Optional[dict[str, str]] = None):
-        """base_topics: {device_id: 'gyvermatrix/room1'}; http_hosts — где HTTP имеется."""
-        self.base_topics = base_topics
+    def __init__(self, devices: Optional[dict[str, dict]] = None, bridge=None):
+        """devices: {device_id: {"topic_map": {canon: topic},
+                                "avail_topic": "...", "topology": {...},
+                                "effects": [...], "http": "..."}}.
+        topic_map строится из скетча GyverHub пользователя (имена виджетов)."""
+        self.devices_cfg = devices or {}
         self.bridge = bridge           # MqttBridge к ЛОКАЛЬНОМУ брокеру
-        self.http_hosts = http_hosts or {}
         self._nodes: dict[str, DeviceNode] = {}
         self._subs: dict[str, Callable] = {}
 
     async def discover(self) -> list[DeviceNode]:
-        """Дискавери по брокеру: подписка на <prefix>/+/available и $SYS."""
+        """Дискавери по сконфигурированным устройствам (GyverHub сам ничего
+        не анонсирует стандартными топиками — только по YAML-конфигу)."""
         found = []
-        prefix = next(iter(self.base_topics.values()), "").split("/")[0]
-        event = asyncio.Event()
-        seen: dict[str, dict] = {}
-
-        async def _probe(topic: str, payload: dict) -> None:
-            parts = topic.split("/")
-            dev = parts[-2] if len(parts) >= 2 else topic
-            seen[dev] = payload
-            event.set()
-
-        self.bridge.on(f"{prefix}/+/available", _probe)
-        try:
-            await asyncio.wait_for(event.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            pass
-        for dev in seen:
-            base_topic = self.base_topics.get(dev, f"{prefix}/{dev}")
-            node = DeviceNode(id=dev, name=dev, ecosystem=Ecosystem.GYVERHUB,
-                              adapter=self.name,
-                              topology=Topology(kind="matrix", length=0, width=16, height=16),
-                              endpoints=[Endpoint(kind=TransportKind.MQTT, base_topic=base_topic)])
-            if dev in self.http_hosts:
-                node.endpoints.append(Endpoint(kind=TransportKind.HTTP, url=self.http_hosts[dev]))
+        for dev, cfg in self.devices_cfg.items():
+            topo = cfg.get("topology", {})
+            node = DeviceNode(id=dev, name=cfg.get("name", dev),
+                              ecosystem=Ecosystem.GYVERHUB, adapter=self.name,
+                              topology=Topology(**topo) if topo else
+                              Topology(kind="matrix", width=16, height=16, length=256),
+                              endpoints=[Endpoint(kind=TransportKind.MQTT,
+                                                  base_topic=next(iter(
+                                                      cfg.get("topic_map", {}).values()),
+                                                      dev))],
+                              native_effects=[NativeRef(ecosystem=self.ecosystem, effect=e)
+                                              for e in cfg.get("effects", [])])
+            if cfg.get("http"):
+                node.endpoints.append(Endpoint(kind=TransportKind.HTTP, url=cfg["http"]))
             self._nodes[dev] = node
             found.append(node)
         return found
 
     async def capabilities(self, device_id: str) -> DeviceNode:
-        node = self._nodes[device_id]
-        bt = node.endpoints[0].base_topic
-        cfg = await self._request(f"{bt}/config")
-        if isinstance(cfg, dict):
-            w = int(cfg.get("width", cfg.get("w", 0)) or 0)
-            h = int(cfg.get("height", cfg.get("h", 0)) or 0)
-            n = int(cfg.get("count", cfg.get("num", 0)) or 0)
-            if w and h:
-                node.topology = Topology(kind="matrix", width=w, height=h, length=w * h)
-            elif n:
-                node.topology = Topology(kind="strip", length=n)
-            node.native_effects = [NativeRef(ecosystem=self.ecosystem, effect=e)
-                                   for e in cfg.get("modes", [])]
-        node.mark_seen()
-        return node
+        self._nodes[device_id].mark_seen()
+        return self._nodes[device_id]
 
     async def get_state(self, device_id: str) -> dict[str, Any]:
-        bt = self._base(device_id)
-        raw = await self._request(f"{bt}/state")
-        canon = {GYVER_TO_CANON.get(k, k): v for k, v in (raw or {}).items()}
+        tm = self._topic_map(device_id)
+        canon: dict[str, Any] = {}
+        for field, topic in tm.items():
+            val = await self._request(topic)
+            if val is not None:
+                canon[field] = val.get("value", val) if isinstance(val, dict) else val
         await self.bridge.publish(self.bridge.t_state(device_id), canon, retain=True)
         return canon
 
     async def set_state(self, device_id: str, state: dict[str, Any],
                         segment: Optional[Segment] = None) -> dict[str, Any]:
-        bt = self._base(device_id)
-        gy = {CANON_TO_GYVER.get(k, k): v for k, v in state.items() if k != "sync"}
+        tm = self._topic_map(device_id)
+        sent: dict[str, Any] = {}
+        for k, v in state.items():
+            if k == "sync" or k == "segment":
+                continue
+            topic = tm.get(k)
+            if topic is None:
+                sent[f"_unmapped:{k}"] = v
+                continue
+            await self.bridge.publish(topic, v, retain=False)
+            sent[k] = v
         if segment is not None:
-            # виртуальные пиксели: у Gyver-прошивок сегментации нет в общем виде —
-            # уходит как offset/length, прошивка native_ct-форка их понимает;
-            # для стоковых — игнорируется с декларацией потери на уровне сервера.
-            gy["offset"] = segment.start
-            gy["length"] = segment.length
-        await self.bridge.publish(f"{bt}/set", gy, retain=True)
-        return {"published": f"{bt}/set", "payload": gy}
+            # у GyverHub-прошивок сегментации нет, если её не заложил автор скетча;
+            # уходит offset/length отдельным топиком, если замапплен, иначе теряется явно
+            stopic = tm.get("segment")
+            if stopic:
+                await self.bridge.publish(stopic, {"start": segment.start,
+                                                   "length": segment.length})
+            else:
+                sent["_loss"] = "segment ignored: no widget mapping in sketch"
+        sent.setdefault("_declared_unsupported", [k for k in sent if k.startswith("_unmapped:")])
+        return sent
 
     async def apply_ir(self, device_id: str, ir: EffectIR,
                        segment: Optional[Segment] = None) -> dict[str, Any]:
-        raise UnsupportedError("GyverHub stock firmware needs IR->native translation")
+        raise UnsupportedError("GyverHub-скетч сам решает, какие виджеты есть; "
+                               "IR транслируется в нативные поля через topic_map + translator")
 
     async def subscribe(self, device_id: str,
                         cb: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
-        bt = self._base(device_id)
+        tm = self._topic_map(device_id)
+        rev = {t: f for f, t in tm.items()}
 
         async def _h(topic: str, payload: dict) -> None:
-            if topic.endswith("/available"):
+            field = rev.get(topic, topic.rsplit("/", 1)[-1])
+            node = self._nodes.get(device_id)
+            if node:
+                node.mark_seen()
+            value = payload.get("value", payload) if isinstance(payload, dict) else payload
+            await cb({field: value})
+
+        for topic in tm.values():
+            self.bridge.on(topic, _h)
+        avail = self.devices_cfg[device_id].get("avail_topic")
+        if avail:
+            async def _a(topic: str, payload: dict) -> None:
                 node = self._nodes.get(device_id)
                 if node:
-                    if payload.get("state") == "offline" or payload in ({"online": False}, {"state": "offline"}):
+                    if isinstance(payload, dict) and payload.get("state") == "offline":
                         node.online = OnlineState.OFFLINE
                     else:
                         node.mark_seen()
-            canon = {GYVER_TO_CANON.get(k, k): v for k, v in payload.items()} \
-                if isinstance(payload, dict) else payload
-            await cb(canon)
+            self.bridge.on(avail, _a)
 
-        self.bridge.on(f"{bt}/+", _h)
-        self.bridge.on(self.bridge.t_avail(device_id), _h)
-
-    def _base(self, device_id: str) -> str:
-        return self._nodes[device_id].endpoints[0].base_topic
+    def _topic_map(self, device_id: str) -> dict[str, str]:
+        return dict(self.devices_cfg.get(device_id, {}).get("topic_map", {}))
 
     async def _request(self, topic: str, timeout: float = 3.0) -> Optional[dict]:
         """Запрос состояния через retained-сообщение: подписка + ожидание."""

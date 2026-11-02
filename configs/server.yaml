@@ -13,13 +13,36 @@ adapters:
   - type: wled
     hosts:               # дополняется mDNS-дискавери (_wled._tcp)
       - 192.168.1.40
-  - type: gyverhub
-    base_topics:         # схема GyverHub -> канон ct/v1 маппится адаптером
-      matrix-wall: gyvermatrix/room1
-      lamp-desk:   gyverlamp/desk
-      garland-v3:  garland/livingroom
-    http_hosts:
-      matrix-wall: http://192.168.1.41
+  - type: gyverhub        # конструктор UI: топики виджетов задаются в скетче,
+    devices:              # поэтому каждый узел описывается topic_map-ом
+      matrix-wall:
+        name: Матрица 16x16 (скетч GyverMatrix)
+        topology: {kind: matrix, width: 16, height: 16, length: 256}
+        effects: [rain, plasma, fire, snake]
+        topic_map:
+          on:        gyvermatrix/room1/power
+          brightness: gyvermatrix/room1/bright
+          effect:    gyvermatrix/room1/mode
+          speed:     gyvermatrix/room1/speed
+        avail_topic: gyvermatrix/room1/available
+        http: http://192.168.1.41
+      garland-v3:
+        name: Гирлянда v3 (GyverHub-скетч)
+        topology: {kind: strip, length: 90}
+        effects: [noise, fade, blink]
+        topic_map:
+          on: garland/livingroom/power
+          brightness: garland/livingroom/bright
+          effect: garland/livingroom/prog
+
+  - type: gyverlamp2      # стоковая GyverLamp2: UDP «GL», см. smeleshkin/GyverLamp2HA;
+    group: 1              # порт вычисляется из группы+ключа (GL/1 => 61197),
+    key: GL               # MQTT у лампы нет — не путать с gyverhub-конструктором
+    lamps:
+      lamp-desk:
+        ip: 192.168.1.51
+        name: Кольцо на столе
+        ledcount: 60
   - type: native_ct
     devices:
       strip-corridor:
