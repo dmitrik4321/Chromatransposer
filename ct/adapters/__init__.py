@@ -6,6 +6,7 @@ from ct.adapters.gyverhub import GyverHubAdapter
 from ct.adapters.gyverlamp2 import GyverLamp2Adapter
 from ct.adapters.generic import GenericAdapter
 from ct.adapters.native_ct import NativeCtAdapter
+from ct.adapters.opera import OperaAdapter
 
 ADAPTERS = {
     "wled": WledAdapter,
@@ -13,4 +14,5 @@ ADAPTERS = {
     "gyverlamp2": GyverLamp2Adapter,  # стоковая GyverLamp2: UDP «GL» (smeleshkin/GyverLamp2HA)
     "generic": GenericAdapter,
     "native_ct": NativeCtAdapter,
+    "opera": OperaAdapter,          # Opera GX через CDP (браузер как устройство)
 }

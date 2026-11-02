@@ -20,6 +20,7 @@ class Ecosystem(str, Enum):
     GYVERLAMP2 = "gyverlamp2" # стоковая GyverLamp2: UDP «GL» (протокол описан smeleshkin/GyverLamp2HA)
     GENERIC = "generic"       # HTTP/MQTT/UDP + конфиг маппинга
     NATIVE_CT = "native_ct"   # собственная прошивка-IR-интерпретатор
+    OPERA = "opera"         # браузер Opera GX как устройство умного дома (CDP)
 
 
 class TransportKind(str, Enum):

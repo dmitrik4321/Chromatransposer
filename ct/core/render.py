@@ -44,8 +44,11 @@ RENDER_CONFIG = {
         "apex_frac": 0.0,           # доля длины ленты на самом верху (0 = острие)
         "base_width": 15,           # ширина основания в символах
     },
+    # профиль тайлов для типа screen (браузер/монитор): плитки «пикселей»
+    "screen_profile": {"cols": 4, "label_w": 12},
     # эвристики типа устройства по ключевым словам id/name/labels
-    "type_heuristics": {"tree": ["ёлк", "елк", "tree", "garland"]},
+    "type_heuristics": {"tree": ["ёлк", "елк", "tree", "garland"],
+                          "screen": ["opera", "browser", "монитор", "tv"]},
 }
 
 
@@ -62,12 +65,13 @@ def configure(cfg: dict) -> None:
 # влияет на то, ЧТО УВИДИТ человек. Определяется: явным labels["type"], иначе
 # по эвристике (см. classify_device). Расширяется без правки кода — через
 # RENDER_CONFIG["type_heuristics"] и profile-таблицу ниже.
-DEVICE_TYPES = ("strip", "matrix", "tree")
+DEVICE_TYPES = ("strip", "matrix", "tree", "screen")
 
 TYPE_PROFILES: dict[str, str] = {
     "strip": "linear",       # развёртка слева направо
     "matrix": "grid",        # WxH сетка
     "tree": "cone",          # спираль на конус: human view = rows*cols
+    "screen": "tiles",       # дискретные «пиксели» произвольной формы (вкладки браузера)
 }
 
 
@@ -329,6 +333,25 @@ def render_device_frame(node, ir: Optional[EffectIR], t: float,
                     else:
                         cells.append(_rgb_cell(0, 0, 0, 0, ramp, cw, dim=True))
             lines.append("".join(cells))
+    elif dtype == "screen":
+        # «пиксели» произвольной формы (вкладки браузера): тайлы с подписями.
+        # Что увидит человек — дискретные плитки, а не линия; u = доля индекса.
+        scfg = cfg.get("screen_profile", {"cols": 4, "label_w": 12})
+        cols = scfg["cols"]
+        labels = node.labels.get("screen_titles", "")
+        labels = labels.split("\x1f") if labels else []   # разделитель из адаптера
+        n = max(len(labels), min(top.length, cfg["max_canvas_px"]), 1)
+        row: list[str] = []
+        for i in range(n):
+            cell = px(i / max(1, n - 1), 0.0, n)
+            label = (labels[i][:scfg["label_w"]] if i < len(labels) else f"#{i}")
+            label = label.ljust(scfg["label_w"])[:scfg["label_w"]]
+            row.append(cell + "\x1b[90m" + label + "\x1b[0m ")
+            if len(row) == cols:
+                lines.append("".join(row))
+                row = []
+        if row:
+            lines.append("".join(row))
     else:  # strip: human view с учётом виртуальных сегментов (canvas_offset)
         total = sum(s.length for s in (seg_map.values() or [] if seg_map else [])) \
             if seg_map else 0
