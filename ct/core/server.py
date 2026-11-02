@@ -133,10 +133,18 @@ class Server:
                     self.config.get("generic_dir", "configs/generic"))
             adapter = cls(**kwargs)
             self.adapters[adapter.name + "-" + str(len(self.adapters))] = adapter
-            for node in await adapter.discover():
-                self.registry.upsert(node)
-                await adapter.subscribe(node.id,
-                                        self._make_state_cb(node.id))
+            discovered = await adapter.discover()
+            if discovered:
+                # узлы known-at-discovery: обычный путь — upsert в реестр
+                for node in discovered:
+                    self.registry.upsert(node)
+                    await adapter.subscribe(node.id,
+                                            self._make_state_cb(node.id))
+            elif hasattr(adapter, "on_node_registered"):
+                # ленивые адаптеры (opera_mqtt): узлы рождаются из трафика;
+                # колбэк даёт им доступ к реестру/оркестратору/discovery —
+                # подписки на состояние адаптер ведёт сам (см. _register_node)
+                adapter.on_node_registered = self._register_lazy_node
 
         # нормализация входящих телеметрий-топиков экосистем в канон
         self.bridge.on("ct/v1/+/telemetry/#", self._on_telemetry)  # + ровно один уровень: # в середине запрещён MQTT
@@ -224,6 +232,22 @@ class Server:
             self.orchestrator.report_state(device_id, state)
             await self.bridge.publish(self.bridge.t_state(device_id), state, retain=True)
         return cb
+
+    async def _register_lazy_node(self, node) -> None:
+        """Регистрация узла, рождённого из входящего трафика (opera_mqtt).
+
+        Делает ровно то же, что путь discover(): upsert в реестр + подписка на
+        состояние (репорт оркестратору и публикация canonical state), плюс
+        discovery-экспорт в HA для нового устройства. Колбэк вызывается
+        адаптером синхронно из обработчика MQTT-сообщения."""
+        self.registry.upsert(node)
+        adapter = self._adapter_for(node)
+        await adapter.subscribe(node.id, self._make_state_cb(node.id))
+        if getattr(self, "discovery", None) is not None:
+            await self.discovery.publish_device(node)
+            if node.telemetry_kinds:
+                await self.discovery.publish_telemetry_sensors(
+                    node.id, node.telemetry_kinds)
 
     async def _on_telemetry(self, topic: str, payload: dict) -> None:
         parts = topic.split("/")

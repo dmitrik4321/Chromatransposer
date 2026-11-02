@@ -74,6 +74,14 @@ class MqttBridge:
             None, lambda: self._client.publish(
                 topic, json.dumps(payload), qos=qos, retain=retain))
 
+    async def publish_raw(self, topic: str, text: str, retain: bool = False,
+                          qos: int = 1) -> None:
+        """Сырой текстовый payload без JSON-обёртки. Нужен для экосистем,
+        чьи клиенты сверяют строку напрямую (Opera smart-home расширение:
+        base/switch.js ждёт ровно 'ON'/'OFF')."""
+        await self._loop.run_in_executor(
+            None, lambda: self._client.publish(topic, text, qos=qos, retain=retain))
+
     async def publish_lwt(self, topic: str) -> None:
         """Установить LWT: при обрыве связи сервера брокер опубликует offline."""
         self._client.will_set(topic, json.dumps({"state": "offline"}),

@@ -30,11 +30,31 @@ DISCOVERY_CONFIG = {
 class HaDiscoveryExporter:
     """Пишет retained discovery-конфиги HA в тот же локальный брокер."""
 
-    def __init__(self, bridge, registry, cfg: Optional[dict] = None):
+    def __init__(self, bridge, registry, cfg: Optional[dict] = None,
+                 adapters=None):
         self.bridge = bridge          # MqttBridge (уже подключён к брокеру)
         self.registry = registry
+        self.adapters = adapters or {}   # {name: adapter} — спрашиваем политики
         self.cfg = {**DISCOVERY_CONFIG, **(cfg or {})}
         self._published: set[str] = set()
+
+    def _hidden_for(self, node) -> set[str]:
+        """Сущности, которые адаптер просит НЕ объявлять в HA UI.
+
+        Так реализуется «убрать Panic Button из UI HA, чтобы не прикалывались»
+        (github.com/operasoftware/opera-smart-home): официальное расширение
+       Opera само публикует discovery-конфиг switch.panic_mode; мы свой экспорт
+        для него не делаем, а гашением ON->OFF занимается сам адаптер
+        (opera_mqtt.ha_entity_policy / panic.auto_off). Исходники Opera и
+        расширения не трогаем — только наша северная сторона."""
+        ad = self.adapters.get(node.adapter)
+        if ad is None:
+            for a in self.adapters.values():
+                if getattr(a, "name", "") == node.adapter:
+                    ad = a
+                    break
+        policy = ad.ha_entity_policy() if hasattr(ad, "ha_entity_policy") else None
+        return set((policy or {}).get("hidden", []))
 
     def _topic(self, component: str, node: str, field: str) -> str:
         # homeassistant/<component>/<node_prefix>-<node>/<field>

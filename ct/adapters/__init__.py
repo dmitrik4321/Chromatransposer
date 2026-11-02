@@ -7,6 +7,7 @@ from ct.adapters.gyverlamp2 import GyverLamp2Adapter
 from ct.adapters.generic import GenericAdapter
 from ct.adapters.native_ct import NativeCtAdapter
 from ct.adapters.opera import OperaAdapter
+from ct.adapters.opera_mqtt import OperaMqttAdapter
 
 ADAPTERS = {
     "wled": WledAdapter,
@@ -14,5 +15,8 @@ ADAPTERS = {
     "gyverlamp2": GyverLamp2Adapter,  # стоковая GyverLamp2: UDP «GL» (smeleshkin/GyverLamp2HA)
     "generic": GenericAdapter,
     "native_ct": NativeCtAdapter,
-    "opera": OperaAdapter,          # Opera GX через CDP (браузер как устройство)
+    "opera": OperaAdapter,            # Opera GX через CDP (--remote-debugging-port)
+    "opera_mqtt": OperaMqttAdapter,   # официальный opera-smart-home: расширение само
+                                      # публикует состояние в брокер; у него же
+                                      # берём политику скрытия Panic Button из HA UI
 }
