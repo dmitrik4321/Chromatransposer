@@ -111,11 +111,23 @@ GYVER_MAP: dict[str, EffectClass] = {
 
 NATIVE_CT_MAP: dict[str, EffectClass] = {c.value: c for c in EffectClass}
 
+# Opera GX (через CDP): родные «эффекты» — действия над вкладкой/звуком
+# (см. OPERA_CONFIG["native_effects"] в ct/adapters/opera.py). Классы, которых
+# нет в этой карте, при портировании на браузер дают честный unsupported.
+OPERA_MAP: dict[str, EffectClass] = {
+    "static": EffectClass.STATIC,           # steady-подсветка активной вкладки
+    "blink": EffectClass.BLINK,             # маркер в document.title
+    "colorsweep": EffectClass.COLORSWOKE,   # бегущая строка заголовка
+    "breathing": EffectClass.BREATHING,     # пульс mute/unmute звука
+    "audio_react": EffectClass.CUSTOM,      # телеметрия WebAudio, opaque
+}
+
 ECOSYSTEM_MAPS: dict[str, dict[str, EffectClass]] = {
     "wled": WLED_MAP,
     "gyverhub": GYVER_MAP,
     "gyverlamp2": GYVERLAMP2_MAP,
     "native_ct": NATIVE_CT_MAP,
+    "opera": OPERA_MAP,
 }
 
 # Классы, требующие матричной топологии, ПО ФАКТУ конкретных прошивок

@@ -7,6 +7,7 @@ paho-mqtt>=2.1
 amqtt>=0.11              # встроенный MQTT-брокер (прослойка сама поднимает MQTT)
 requests>=2.31
 aiohttp>=3.9
+websockets>=12.0        # CDP-клиент адаптера opera (Runtime.evaluate)
 zeroconf>=0.130
 pytest>=8.0
 pytest-asyncio>=0.24

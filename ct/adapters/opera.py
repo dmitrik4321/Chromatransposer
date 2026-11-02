@@ -165,8 +165,15 @@ class OperaAdapter(SouthboundAdapter):
     ecosystem = "opera"
 
     def __init__(self, bridge=None, config: Optional[dict] = None,
-                 hosts: Optional[list[str]] = None):
+                 hosts: Optional[list[str]] = None, device_id: str = "",
+                 name: str = ""):
+        # device_id/name принимаются напрямую из YAML-спека адаптера
+        # (server.yaml прокидывает все ключи спека kwargs-ами).
         self.cfg = {**OPERA_CONFIG, **(config or {})}
+        if device_id:
+            self.cfg["device_id"] = device_id
+        if name:
+            self.cfg["name"] = name
         self.bridge = bridge
         self._hosts = list(hosts or []) or [self.cfg["http_base"]] + list(self.cfg["discover_urls"])
         self._nodes: dict[str, DeviceNode] = {}

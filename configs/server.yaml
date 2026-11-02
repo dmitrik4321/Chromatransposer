@@ -56,6 +56,12 @@ adapters:
         ip: 192.168.1.51
         name: Кольцо на столе
         ledcount: 60
+  - type: opera           # Opera GX как устройство умного дома: публичного API
+    hosts:                # нет, управляем через официальный CDP (--remote-debugging-port).
+      - http://127.0.0.1:9222   # запуск: opera.exe --remote-debugging-port=9222
+    device_id: opera-gx
+    name: Opera GX
+    # config: {poll_interval_s: 2.0}   # остальное — OPERA_CONFIG в начале файла
   - type: native_ct
     devices:
       strip-corridor:
