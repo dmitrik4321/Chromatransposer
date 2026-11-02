@@ -41,6 +41,8 @@ class FakeBridge:
     @staticmethod
     def t_avail(dev): return f"ct/v1/{dev}/available"
     @staticmethod
+    def t_set(dev): return f"ct/v1/{dev}/set"
+    @staticmethod
     def t_telemetry(dev, kind): return f"ct/v1/{dev}/telemetry/{kind}"
 
 
@@ -49,15 +51,16 @@ def adapter():
     br = FakeBridge()
     a = OperaMqttAdapter(bridge=br)
     yield a, br
-    asyncio.get_event_loop().run_until_complete(a.close())
+    # teardown в том же цикле, где создавались задачи (иначе cancel() на
+    # закрытом дефолтном лупе падает с "Event loop is closed")
+    _LOOP.run_until_complete(a.close())
+
+
+_LOOP = asyncio.new_event_loop()
 
 
 def run(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    return _LOOP.run_until_complete(coro)
 
 
 def test_discover_subscribes_opera_space(adapter):
@@ -130,7 +133,7 @@ def test_segments_unsupported(adapter):
     run(a._on_opera_msg("opera/gx/sensor/number_of_tabs", {"raw": "2"}))
     with pytest.raises(UnsupportedError):
         run(a.set_state("opera-gx-mqtt-gx", {"on": True},
-                        segment=Segment(start=0, length=2)))
+                        segment=Segment(device_id="opera-gx-mqtt-gx", start=0, length=2)))
 
 
 def test_ir_perlin_unsupported_blink_ok(adapter):
@@ -179,5 +182,7 @@ def test_discovery_no_adapters_still_works(adapter):
     node = a._nodes["gx"]
     exp = HaDiscoveryExporter(br, FakeRegistry())
     run(exp.publish_device(node))
-    cfg = [p for t, p, r in br.published if t.endswith("light/config")][-1]
+    cfgs = [(t, p) for t, p, r in br.published if t.endswith("light/config")]
+    assert cfgs, f"discovery-конфиг не опубликован; topics={[t for t,_,_ in br.published]}"
+    cfg = cfgs[-1][1]
     assert "panic_mode" in cfg["effect_list"]   # без политики — как есть
