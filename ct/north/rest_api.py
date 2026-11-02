@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
@@ -241,6 +242,27 @@ async def reconcile(caller: Caller = Depends(get_caller)):
 @app.get("/api/v1/telemetry")
 def telemetry(caller: Caller = Depends(get_caller)):
     return server.telemetry_latest
+
+
+@app.get("/api/v1/render/snapshot")
+def render_snapshot(caller: Caller = Depends(get_caller)):
+    """Кадры ASCII-предпросмотра для удалённого CLI.
+
+    Честно: это ПРЕДПОЛОЖЕНИЕ сервера по desired-IR (control plane), а не
+    снимок реальной ленты; точность зависит от адаптеров.
+    """
+    from ct.core.render import classify_device, render_device_frame
+    t = time.time()
+    out = []
+    for node in server.registry.all():
+        ir = server.orchestrator.desired_ir(node.id)
+        segs = {}
+        for g in server.orchestrator.groups.values():
+            segs.update(g.segments)
+        lines = render_device_frame(node, ir, t, seg_map=segs)
+        out.append({"device": node.id, "type": classify_device(node),
+                    "lines": lines})
+    return {"t": t, "devices": out}
 
 
 @app.get("/api/v1/status")

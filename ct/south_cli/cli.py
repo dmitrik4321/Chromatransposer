@@ -7,6 +7,10 @@
                            команды идут напрямую в Server-объект)
 
 Команды консоли см. HELP; история/табы не входят в MVP.
+
+ASCII-предпросмотр (`render on`): фоновый task рисует кадры desired-IR в
+отдельной зоне над prompt, стирая предыдущий ANSI-стиранием; ввод команд
+не блокируется (см. ct.core.render.FrameLogger).
 """
 from __future__ import annotations
 
@@ -21,6 +25,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+# ------------------------------ КОНФИГ CLI (дефолты) --------------------------
+# Всё меняемое — здесь; переопределяется секцией `cli:` configs/server.yaml
+# (в --local) или ключами запуска.
+CLI_CONFIG = {
+    "url": "http://127.0.0.1:8300",
+    "render_fps_remote": 5.0,     # удалённый режим: опрос /api/v1/render/snapshot
+    "render_zone_height": 24,     # строк зоны предпросмотра
+}
+
 console = Console()
 
 HELP = """
@@ -31,6 +44,8 @@ HELP = """
   set <device> k=v [k=v ...]     команда (on=true bri=128)
   ir <device> <json|@file>       применить EffectIR напрямую (native_ct/generic)
   port <src_json> <dst_device>   портирование native->IR->native
+  render on|off [device]         ASCII-предпросмотр «что должно быть на ленте»
+                                 (общий тик, новый кадр стирает старый)
   group create <id> <pat,...> [--sync] [seg:dev=start:len:off,...]
   group run <id> k=v [...]       одна команда — много узлов
   scene save <id> <json|@file> | scene run <id>
@@ -103,11 +118,23 @@ def render_devices(rows) -> None:
     console.print(t)
 
 
-async def handle_line(client: CliClient | None, local_server, parts: list[str]) -> None:
+async def handle_line(client: CliClient | None, local_server, parts: list[str],
+                      frame_logger=None) -> None:
     cmd = parts[0] if parts else ""
     args = parts[1:]
 
-    if cmd == "devices":
+    if cmd == "render" and args:
+        if frame_logger is None:
+            console.print("[red]предпросмотр недоступен[/]")
+        elif args[0] == "on":
+            only = args[1] if len(args) > 1 else None
+            await frame_logger.start(only_device=only)
+            console.print(f"[green]render on[/]"
+                          + (f" (только {only})" if only else ""))
+        else:
+            await frame_logger.stop()
+            console.print("[yellow]render off[/]")
+    elif cmd == "devices":
         render_devices(client.get("/api/v1/devices") if client
                        else [d.model_dump() for d in local_server.registry.all()])
     elif cmd == "caps" and args:

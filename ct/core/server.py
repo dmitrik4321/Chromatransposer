@@ -24,6 +24,7 @@ from ct.core.mqtt_bridge import MqttBridge
 from ct.core.mqtt_broker import EmbeddedBroker
 from ct.core.orchestrator import Caller, Group, Orchestrator, Scene, Schedule
 from ct.core.registry import Registry
+from ct.core.render import RENDER_CONFIG, configure as configure_render
 from ct.core.translator import configure as configure_translator, ir_to_native, native_to_ir
 
 # ------------------------------ КОНФИГ СЕРВЕРА (дефолты) ----------------------
@@ -46,6 +47,11 @@ SERVER_CONFIG = {
     "sync": {"tick_hz": 5},                        # общий тик стендов (решение B)
     "reconcile_interval_s": 30.0,                  # периодическая реконсиляция
     "generic_dir": "configs/generic",              # YAML-маппинги «лапши»
+    "render": {                                    # ASCII-предпросмотр в CLI
+        "fps": 10.0, "cell_width": 2, "zone_height": 24,
+        # типизация: явный device_type > labels.type > эвристика по ключевым словам
+        "type_heuristics": {"tree": ["ёлк", "елк", "tree", "garland"]},
+    },
 }
 
 
@@ -102,6 +108,8 @@ class Server:
 
         # транслятор: карты/шкалы/лестница деградации из YAML (без хардкода)
         configure_translator(self.config.get("translator", {}))
+        # ASCII-предпросмотр: рендер-конфиг тоже из YAML
+        configure_render({**RENDER_CONFIG, **self.config.get("render", {})})
 
         mqtt_cfg = self.config.get("mqtt", {})
         # если брокер встроенный — клиент моста идёт на фактический bind-адрес

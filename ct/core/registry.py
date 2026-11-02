@@ -49,6 +49,7 @@ class DeviceNode(BaseModel):
     name: str = ""
     ecosystem: Ecosystem
     adapter: str                          # имя класса адаптера ("wled", "gyverhub", ...)
+    device_type: str = ""                 # strip | matrix | tree; пусто -> classify() по топологии
     topology: Topology
     endpoints: list[Endpoint] = Field(default_factory=list)
     native_effects: list[NativeRef] = Field(default_factory=list)
