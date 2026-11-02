@@ -38,23 +38,51 @@ class HaDiscoveryExporter:
         self.cfg = {**DISCOVERY_CONFIG, **(cfg or {})}
         self._published: set[str] = set()
 
-    def _hidden_for(self, node) -> set[str]:
-        """Сущности, которые адаптер просит НЕ объявлять в HA UI.
-
-        Так реализуется «убрать Panic Button из UI HA, чтобы не прикалывались»
-        (github.com/operasoftware/opera-smart-home): официальное расширение
-       Opera само публикует discovery-конфиг switch.panic_mode; мы свой экспорт
-        для него не делаем, а гашением ON->OFF занимается сам адаптер
-        (opera_mqtt.ha_entity_policy / panic.auto_off). Исходники Opera и
-        расширения не трогаем — только наша северная сторона."""
+    def _adapter_for(self, node):
+        """Адаптер узла по имени (registry-агностично: политики спрашиваем у адаптера)."""
         ad = self.adapters.get(node.adapter)
         if ad is None:
             for a in self.adapters.values():
                 if getattr(a, "name", "") == node.adapter:
                     ad = a
                     break
+        return ad
+
+    def _policy_for(self, node) -> dict:
+        ad = self._adapter_for(node)
         policy = ad.ha_entity_policy() if hasattr(ad, "ha_entity_policy") else None
-        return set((policy or {}).get("hidden", []))
+        return policy or {}
+
+    def _hidden_for(self, node) -> set[str]:
+        """Сущности, которые адаптер просит НЕ объявлять в HA UI.
+
+        Так реализуется «убрать Panic Button из UI HA, чтобы не прикалывались»
+        (github.com/operasoftware/opera-smart-home): официальное расширение
+        Opera само публикует discovery-конфиг switch.panic_mode; мы свой экспорт
+        для него не делаем, а гашением ON->OFF занимается сам адаптер
+        (opera_mqtt.ha_entity_policy / panic.auto_off). Исходники Opera и
+        расширения не трогаем — только наша северная сторона."""
+        return set(self._policy_for(node).get("hidden", []))
+
+    def _entity_categories_for(self, node) -> dict[str, str]:
+        """Категории сущностей нашего light-экспорта (HA >=2024.4).
+
+        Зачем: официальное расширение Opera САМО публикует в брокер discovery
+        switch.panic_mode — запретить это без патча расширения нельзя (и не
+        надо). Поэтому «убрать Panic Button из UI HA» делаем штатным механизмом
+        HA на НАШЕЙ стороне: entity_category=config у связанных переключателей
+        заставляет HA прятать их из карточки устройства по умолчанию. Политика
+        приходит от адаптера (opera_mqtt.ha_entity_policy), ключи 'switch.<id>'
+        -> категория. Исходники Opera/расширения не трогаем."""
+        policy = self._policy_for(node)
+        cats: dict[str, str] = {}
+        for ent in policy.get("hidden", []):
+            if ent.startswith("switch."):
+                cats[ent.split(".", 1)[1]] = "config"
+        if policy.get("hide_commands"):
+            for cmd in policy.get("commands", []):
+                cats[cmd] = "config"
+        return cats
 
     def _topic(self, component: str, node: str, field: str) -> str:
         # homeassistant/<component>/<node_prefix>-<node>/<field>
@@ -93,7 +121,14 @@ class HaDiscoveryExporter:
                 "{{ value_json.color.r }},{{ value_json.color.g }},{{ value_json.color.b }}"
                 "{% endif %}"),
             "effect": True,
-            "effect_list": sorted({e.effect for e in node.native_effects}) or ["none"],
+            # эффект-список чистим по политике адаптера: «убрать Panic Button из
+            # UI HA» (github.com/operasoftware/opera-smart-home) — штатный
+            # panic_mode не попадает ни в effect_list нашей light-сущности,
+            # ни в отдельные switch-конфиги; исходники Opera не трогаем.
+            "effect_list": sorted(
+                {e.effect for e in node.native_effects}
+                - {h.split(".", 1)[1] for h in self._hidden_for(node)}
+            ) or ["none"],
             "effect_value_template": "{{ value_json.effect | default('none') }}",
             "effect_command_template": '{"effect": "{{ value }}"}',
             "device": {

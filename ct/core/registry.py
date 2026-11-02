@@ -79,6 +79,14 @@ class Registry:
 
     def upsert(self, node: DeviceNode) -> DeviceNode:
         self._devices[node.id] = node
+        # upsert не должен терять состояние живого узла: если у существующего
+        # узла уже есть last_seen (трафик шел), а новый пришёл «свежевылепленный»
+        # с нулём — берём максимум, иначе реконсиляция сочтёт его офлайном.
+        old = self._devices.get(node.id)
+        if old is not None and getattr(old, "last_seen", 0) > node.last_seen:
+            node.last_seen = old.last_seen
+            if old.online == OnlineState.ONLINE and node.online != OnlineState.ONLINE:
+                node.online = old.online
         self._notify(node.id)
         return node
 

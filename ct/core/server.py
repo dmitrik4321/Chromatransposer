@@ -164,7 +164,8 @@ class Server:
         # 2) HA: discovery-экспорт + фоновый подъём контейнера (не блокирует старт).
         self.discovery = HaDiscoveryExporter(
             self.bridge, self.registry,
-            self.config.get("homeassistant", {}).get("discovery"))
+            self.config.get("homeassistant", {}).get("discovery"),
+            adapters=self.adapters)      # политики «что скрыть из UI HA» — у адаптеров
         await self.discovery.publish_all()
         if self.config.get("homeassistant", {}).get("mode", "embedded") != "off":
             self._ha_task = asyncio.create_task(self._ha_bootstrap())
@@ -308,6 +309,9 @@ class Server:
         return ir_to_native(ir, self.registry.get(target_id))
 
     def _adapter_for(self, node) -> SouthboundAdapter:
+        # узел хранит имя класса адаптера (node.adapter), а ключ реестра
+        # адаптеров — "<name>-<n>" (несколько экземпляров одного класса);
+        # ищем по имени класса, как в exporter'е.
         for a in self.adapters.values():
             if a.name == node.adapter:
                 return a

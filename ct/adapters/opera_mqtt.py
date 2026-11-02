@@ -132,7 +132,9 @@ class OperaMqttAdapter(SouthboundAdapter):
     ecosystem = "opera"
 
     def __init__(self, bridge=None, config: Optional[dict] = None,
-                 device_id: str = "", name: str = ""):
+                 device_id: str = "", name: str = "", **extra):
+        # **extra — терпимость к общим ключам specs из server.yaml
+        # (hosts и т.п. этого коннектору не нужны: узлы рождаются из трафика).
         self.cfg = {**OPERA_MQTT_CONFIG, **(config or {})}
         if device_id:
             self.cfg["device_id"] = device_id
@@ -170,7 +172,9 @@ class OperaMqttAdapter(SouthboundAdapter):
             adapter=self.name, device_type="screen",
             topology=Topology(kind="strip", length=0, width=1, height=1,
                               color_order="RGB", max_fps=1),
-            endpoints=[Endpoint(kind=TransportKind.MQTT, url="opera/#")],
+            endpoints=[Endpoint(kind=TransportKind.MQTT, url="opera/#"),
+                       Endpoint(kind=TransportKind.MQTT,
+                                url=f"ct/v1/{did}/set")],   # команды сверху
             native_effects=[NativeRef(ecosystem=self.ecosystem, effect=e["effect"],
                                        args={"class": e["class"]})
                             for e in self.cfg["native_effects"]],
@@ -390,8 +394,8 @@ class OperaMqttAdapter(SouthboundAdapter):
         if self.cfg["panic"].get("hide_from_ha", True):
             hidden.append("switch.panic_mode")
         return {"hidden": hidden,
-                "auto_off": {k: v for k, v in [("switch.panic_mode",
-                                                self.cfg["panic"].get("auto_off", True))]},
+                "auto_off": {"switch.panic_mode":
+                             bool(self.cfg["panic"].get("auto_off", True))},
                 "namespace": "opera"}
 
     async def close(self) -> None:

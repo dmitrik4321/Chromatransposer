@@ -62,6 +62,16 @@ adapters:
     device_id: opera-gx
     name: Opera GX
     # config: {poll_interval_s: 2.0}   # остальное — OPERA_CONFIG в начале файла
+  - type: opera_mqtt      # второй коннектор к той же Opera GX: ОФИЦИАЛЬНОЕ расширение
+    # config:             # github.com/operasoftware/opera-smart-home (Apache-2.0).
+    #   panic:            # Расширение само публикует состояние в локальный брокер —
+    #     hide_from_ha: true   # Panic Button не объявляем в HA UI (хотелка),
+    #     auto_off: true       # а если его включили руками — гасим OFF командой.
+    #   hide_entities_extra: [] # доп. антиприкол: скрыть ещё сущности от HA
+    device_id: opera-gx-mqtt
+    name: Opera GX (smart-home ext)
+    # узлы рождаются лениво из трафика opera/<prefix>/... — hosts не нужны;
+    # всё остальное — OPERA_MQTT_CONFIG в начале ct/adapters/opera_mqtt.py
   - type: native_ct
     devices:
       strip-corridor:

@@ -128,6 +128,10 @@ ECOSYSTEM_MAPS: dict[str, dict[str, EffectClass]] = {
     "gyverlamp2": GYVERLAMP2_MAP,
     "native_ct": NATIVE_CT_MAP,
     "opera": OPERA_MAP,
+    # opera_mqtt — тот же набор классов: официальное расширение умеет те же
+    # штатные сущности (switch/command); имена native-эффектов берём из
+    # OPERA_MQTT_CONFIG["native_effects"] адаптера.
+    "opera_mqtt": OPERA_MAP,
 }
 
 # Классы, требующие матричной топологии, ПО ФАКТУ конкретных прошивок
