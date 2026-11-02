@@ -27,14 +27,18 @@ class MqttBridge:
     """Мост к локальному брокеру с async-обёрткой поверх paho-потока."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 1883,
-                 client_id: str = "chromatransposer"):
+                 client_id: str = "chromatransposer", protocol: int = None):
         self.host, self.port = host, port
+        # MQTT 3.1.1: встроенный AMQTT-брокер не принимает v5 CONNECT
+        # (проверено на amqtt 0.12), а внешние брокеры 311 понимают все.
+        if protocol is None:
+            protocol = mqtt.MQTTv311
         # paho >= 2.x: единый CallbackAPIVersion.VERSION2
         try:
             self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                                       client_id=client_id, protocol=mqtt.MQTTv5)
+                                       client_id=client_id, protocol=protocol)
         except AttributeError:  # старый paho 1.x
-            self._client = mqtt.Client(client_id=client_id, protocol=mqtt.MQTTv5)
+            self._client = mqtt.Client(client_id=client_id, protocol=protocol)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._handlers: list[tuple[str, Callable[[str, dict], Awaitable[None]]]] = []
         self._connected = asyncio.Event()

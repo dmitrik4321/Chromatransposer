@@ -17,8 +17,10 @@ import yaml
 from ct.adapters import ADAPTERS
 from ct.adapters.base import SouthboundAdapter, UnsupportedError
 from ct.core.auth import Provisioning
+from ct.core.ha_bridge import HaBridge
 from ct.core.ir import EffectIR, NativeRef, PortResult, Segment
-from ct.core.mqtt_bus import MqttBridge
+from ct.core.mqtt_bridge import MqttBridge
+from ct.core.mqtt_broker import EmbeddedBroker
 from ct.core.orchestrator import Caller, Group, Orchestrator, Scene, Schedule
 from ct.core.registry import Registry
 from ct.core.translator import configure as configure_translator, ir_to_native, native_to_ir
@@ -26,7 +28,19 @@ from ct.core.translator import configure as configure_translator, ir_to_native, 
 # ------------------------------ КОНФИГ СЕРВЕРА (дефолты) ----------------------
 # Всё меняемое — здесь; переопределяется configs/server.yaml (конфиг как код).
 SERVER_CONFIG = {
-    "mqtt": {"host": "127.0.0.1", "port": 1883},   # только локальный брокер (решение D)
+    "mqtt": {
+        "host": "127.0.0.1", "port": 1883,          # адрес БРОКЕРА для клиента моста
+        "broker": {"enabled": True},                # встроенный брокер: прослойка
+                                                    # сама поднимает MQTT (решение D)
+    },
+    "homeassistant": {                               # HA тоже нужен (требование)
+        "mode": "embedded",       # embedded|external|off — прослойка сама поднимает HA
+        "container": "chromatransposer-ha",
+        "image": "homeassistant/home-assistant:latest",
+        "port": 8123,
+        "token_file": "state/ha_token",             # long-lived токен для discovery-экспорта
+        "startup_timeout_s": 90,
+    },
     "state_dir": "state",
     "sync": {"tick_hz": 5},                        # общий тик стендов (решение B)
     "reconcile_interval_s": 30.0,                  # периодическая реконсиляция
