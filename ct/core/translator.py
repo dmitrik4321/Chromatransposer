@@ -16,9 +16,45 @@ from ct.core.ir import (
 )
 from ct.core.registry import DeviceNode
 
+# ------------------------------ КОНФИГ ТРАНСЛЯТОРА ----------------------------
+# Всё меняемое собрано здесь; сервер переопределяет любой ключ секцией
+# `translator:` в configs/server.yaml (см. configure()). Формат YAML-переопределения:
+#   translator:
+#     fallback_order: [static, breathing]      # деградационная лестница
+#     matrix_only_default: [fire, plasma]      # классы, привязанные к матрице
+#     topology_exempt: {gyverlamp2: [fire]}    # исключения по факту прошивок
+#     ecosystem_maps: {wled: {myfx: perlin}}   # пополнение карт (небольшая магия)
+TRANSLATOR_CONFIG = {
+    "fallback_order": [EffectClass.STATIC, EffectClass.BREATHING,
+                       EffectClass.COLORSWOKE],
+    "matrix_only_default": {EffectClass.FIRE, EffectClass.PLASMA, EffectClass.RAIN},
+    "topology_exempt": {"gyverlamp2": {EffectClass.FIRE, EffectClass.COLORSWOKE,
+                                       EffectClass.RAINBOW}},
+    "gyverlamp2_scales": {"speed": (0, 255), "scale": (0, 255),
+                          "brightness": (0, 255)},
+}
+
+
+def configure(cfg: dict) -> None:
+    """Переопределение TRANSLATOR_CONFIG из YAML (вызывается Server.start)."""
+    for k, v in (cfg or {}).items():
+        if k == "fallback_order":
+            TRANSLATOR_CONFIG[k] = [EffectClass(x) for x in v]
+        elif k in ("matrix_only_default",):
+            TRANSLATOR_CONFIG[k] = {EffectClass(x) for x in v}
+        elif k == "topology_exempt":
+            TRANSLATOR_CONFIG[k] = {eco: {EffectClass(x) for x in s}
+                                    for eco, s in v.items()}
+        elif k == "ecosystem_maps":
+            for eco, m in v.items():
+                ECOSYSTEM_MAPS.setdefault(eco, {}).update(
+                    {name.lower(): EffectClass(cls) for name, cls in m.items()})
+        else:
+            TRANSLATOR_CONFIG[k] = v
+
 # --- Словари соответствий родных имён эффектов -> класс IR ------------------
 # Пополняется по мере роста адаптеров. Ключ — экосистема, значение —
-# {имя_родного_эффекта(нижний регистр): (класс, карта параметров)}.
+# {имя_родного_эффекта(нижний регистр): класс}.
 
 WLED_MAP: dict[str, EffectClass] = {
     "perlinnoise": EffectClass.PERLIN,
@@ -85,25 +121,18 @@ ECOSYSTEM_MAPS: dict[str, dict[str, EffectClass]] = {
 # Классы, требующие матричной топологии, ПО ФАКТУ конкретных прошивок
 # (сверено с GyverLamp2HA/smeleshkin: fire/fire2020/particles/confetti и cycle
 #  стоковая лампа рисует на 1D-кольце; а вот tornado/clock — матричные).
-MATRIX_ONLY_BY_ECOSYSTEM: dict[str, set] = {
-    "gyverlamp2": {EffectClass.CUSTOM},   # tornado/clock помечены custom+matrix ниже
-    "wled": set(),                        # WLED сам решает, что деградировать
-    "gyverhub": set(),
-}
-MATRIX_ONLY_DEFAULT = {EffectClass.FIRE, EffectClass.PLASMA, EffectClass.RAIN}
-# Исключения по факту прошивок: стоковая GyverLamp2 рисует огонь/цикл/радугу
-# процедурно на 1D-кольце — для неё эти классы НЕ топологически привязаны.
-TOPOLOGY_EXEMPT: dict[str, set] = {
-    "gyverlamp2": {EffectClass.FIRE, EffectClass.COLORSWOKE, EffectClass.RAINBOW},
-}
+# Наборы живут в TRANSLATOR_CONFIG и переопределяются из YAML (см. configure()).
+CUSTOM_MATRIX_ONLY = {EffectClass.CUSTOM}   # tornado/clock: custom + матрица
 
 
 def _matrix_only(ir_class: EffectClass, ecosystem: str) -> bool:
+    exempt = TRANSLATOR_CONFIG["topology_exempt"].get(ecosystem, set())
+    default_matrix = TRANSLATOR_CONFIG["matrix_only_default"]
     if ecosystem == "gyverlamp2":
         if ir_class is EffectClass.CUSTOM:
             return True                   # tornado/clock — только матрица, 1:1 нет
-        return ir_class in (MATRIX_ONLY_DEFAULT - TOPOLOGY_EXEMPT["gyverlamp2"])
-    return ir_class in MATRIX_ONLY_DEFAULT
+        return ir_class in (default_matrix - exempt)
+    return ir_class in default_matrix
 
 
 def _norm(v: float, lo: float, hi: float) -> float:
@@ -138,10 +167,12 @@ def native_to_ir(ref: NativeRef, args: Optional[dict] = None) -> EffectIR:
         params.scale = _norm(float(a.get("scale", 50)), 0, 100)
         params.brightness = _norm(float(a.get("bright", a.get("brightness", 100))), 0, 100)
     elif ref.ecosystem == "gyverlamp2":
-        # GyverLamp2: speed/scale/bright — байты 0..255 (проверено по протоколу GL)
-        params.speed = _norm(float(a.get("speed", 128)), 0, 255)
-        params.scale = _norm(float(a.get("scale", 128)), 0, 255)
-        params.brightness = _norm(float(a.get("bright", 255)), 0, 255)
+        # GyverLamp2: speed/scale/bright — байты 0..255 (проверено по протоколу GL);
+        # шкалы настраиваются в TRANSLATOR_CONFIG["gyverlamp2_scales"] (YAML).
+        sc = TRANSLATOR_CONFIG["gyverlamp2_scales"]
+        params.speed = _norm(float(a.get("speed", 128)), *sc["speed"])
+        params.scale = _norm(float(a.get("scale", 128)), *sc["scale"])
+        params.brightness = _norm(float(a.get("bright", 255)), *sc["brightness"])
         if int(a.get("sound_react", 1)) != 1:
             losses.append("soundReact выключен — реакция на звук теряется при чтении")
     else:
@@ -230,8 +261,7 @@ def ir_to_native(ir: EffectIR, target: DeviceNode) -> PortResult:
 
 def _degrade(ir: EffectIR, target: DeviceNode, reverse: dict, notes: list[str]) -> PortResult:
     available = set(reverse.keys())
-    fallback_order = [EffectClass.STATIC, EffectClass.BREATHING, EffectClass.COLORSWOKE]
-    for fb in fallback_order:
+    for fb in TRANSLATOR_CONFIG["fallback_order"]:   # лестница настраивается YAML
         if fb in available and fb is not ir.class_:
             deg_losses = [f"'{ir.class_.value}' -> '{fb.value}' composition"] + list(notes)
             deg = EffectIR(**{"class": EffectClass.COMPOSITION},

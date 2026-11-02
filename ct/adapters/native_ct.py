@@ -18,12 +18,22 @@ from ct.core.registry import (DeviceNode, Endpoint, Ecosystem, OnlineState,
                               TransportKind)
 
 
+# ------------------------------ КОНФИГ АДАПТЕРА ------------------------------
+# Всё меняемое — здесь; переопределяется секцией adapters[].config в YAML.
+NATIVE_CT_CONFIG = {
+    "state_retain": True,           # retain для state/available (детекция офлайна)
+    "set_qos": 1,                   # команды с гарантией доставки
+    "sensor_forward_qos": 0,        # телеметрия — поспешнее, без гарантий
+}
+
+
 class NativeCtAdapter(SouthboundAdapter):
     name = "native_ct"
     ecosystem = "native_ct"
 
-    def __init__(self, devices: dict[str, dict], bridge):
+    def __init__(self, devices: dict[str, dict], bridge, config: Optional[dict] = None):
         """devices: {device_id: {"topology": {...}, "telemetry": ["audio_level"]}} из конфига."""
+        self.cfg = {**NATIVE_CT_CONFIG, **(config or {})}   # YAML поверх дефолтов
         self.cfgs = devices
         self.bridge = bridge
         self._nodes: dict[str, DeviceNode] = {}
@@ -64,7 +74,8 @@ class NativeCtAdapter(SouthboundAdapter):
         payload = dict(state)
         if segment is not None:
             payload["segment"] = segment.model_dump()
-        await self.bridge.publish(self.bridge.t_set(device_id), payload)
+        await self.bridge.publish(self.bridge.t_set(device_id), payload,
+                                  qos=self.cfg["set_qos"])
         return payload
 
     async def apply_ir(self, device_id: str, ir: EffectIR,
@@ -73,7 +84,8 @@ class NativeCtAdapter(SouthboundAdapter):
         payload = ir.model_dump(by_alias=True, exclude_none=True)
         if segment is not None:
             payload["segment"] = segment.model_dump()
-        await self.bridge.publish(self.bridge.t_ir(device_id), payload)
+        await self.bridge.publish(self.bridge.t_ir(device_id), payload,
+                                  qos=self.cfg["set_qos"])
         return payload
 
     async def subscribe(self, device_id: str,

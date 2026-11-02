@@ -80,6 +80,14 @@ def _arg_token(s: str) -> dict:
     return json.loads(s)
 
 
+def _pj(obj) -> None:
+    """Печать JSON (dict или готовая JSON-строка) через Rich."""
+    if isinstance(obj, str):
+        console.print_json(json=obj)
+    else:
+        console.print_json(data=obj)
+
+
 def render_devices(rows) -> None:
     t = Table(title="Устройства")
     for col in ("id", "экосистема", "адаптер", "топология", "IR", "сегм.", "онлайн"):
@@ -103,22 +111,21 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
                        else [d.model_dump() for d in local_server.registry.all()])
     elif cmd == "caps" and args:
         if client:
-            console.print_json(json=client.get(f"/api/v1/devices/{args[0]}"))
+            _pj(client.get(f"/api/v1/devices/{args[0]}"))
         else:
             node = await local_server._adapter_for(
                 local_server.registry.get(args[0])).capabilities(args[0])
-            console.print_json(node.model_dump_json())
+            _pj(node.model_dump_json())
     elif cmd == "state" and args:
-        console.print_json(json=(client.get(f"/api/v1/devices/{args[0]}/state") if client
-                                 else await local_server.registry.get(args[0]) and
-                                      local_server._adapter_for(local_server.registry.get(args[0]))
-                                      .get_state(args[0])))
+        _pj(client.get(f"/api/v1/devices/{args[0]}/state") if client
+            else await local_server._adapter_for(
+                local_server.registry.get(args[0])).get_state(args[0]))
     elif cmd == "set" and len(args) >= 2:
         body = {"state": _kv(args[1:])}
         res = (client.post(f"/api/v1/devices/{args[0]}/state", body) if client
                else await local_server.orchestrator.command_device(
                    args[0], body["state"], _local_caller(local_server)))
-        console.print_json(json=res)
+        _pj(res)
     elif cmd == "ir" and len(args) >= 2:
         ir = _arg_token(args[1])
         body = {"ir": ir}
@@ -126,7 +133,7 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
                else await local_server.orchestrator.command_device(
                    args[0], {}, _local_caller(local_server),
                    __import__("ct.core.ir", fromlist=["EffectIR"]).EffectIR(**ir)))
-        console.print_json(json=res)
+        _pj(res)
     elif cmd == "port" and len(args) >= 2:
         src = _arg_token(args[0])
         body = {"source": src, "target_device": args[1]}
@@ -134,13 +141,13 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
                else local_server.port_native(
                    __import__("ct.core.ir", fromlist=["NativeRef"]).NativeRef(**src),
                    args[1]).model_dump())
-        console.print_json(json=res)
+        _pj(res)
     elif cmd == "reconcile":
-        console.print_json(json=(client.post("/api/v1/reconcile") if client
-                                 else await local_server.orchestrator.reconcile()))
+        _pj(client.post("/api/v1/reconcile") if client
+            else await local_server.orchestrator.reconcile())
     elif cmd == "telemetry":
-        console.print_json(json=(client.get("/api/v1/telemetry") if client
-                                 else local_server.telemetry_latest))
+        _pj(client.get("/api/v1/telemetry") if client
+            else local_server.telemetry_latest)
     elif cmd == "release" and args:
         from ct.core.orchestrator import Caller
         if client:
@@ -171,7 +178,7 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
         sig = local_server.provisioning.admin_secret if not client else ""
         body = {"which": which, "opened": onoff == "on", "admin_signature": sig}
         if client:
-            console.print_json(json=client.post("/api/v1/provision/windows", body))
+            _pj(client.post("/api/v1/provision/windows", body))
         else:
             local_server.provisioning.set_window(which, onoff == "on", sig)
             console.print(f"[green]window {which}: {onoff}[/]")
@@ -184,9 +191,101 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
             tok = local_server.provisioning.issue_token(caller_id, role, sig)
             console.print(Panel(tok.model_dump_json(indent=2), title="API токен"))
     elif cmd in ("group", "scene", "schedule"):
-        console.print("[yellow]заглушка v0.2: используйте REST /api/v1/groups|scenes[/]")
+        await _entity_cmd(client, local_server, parts)
     else:
         console.print(HELP)
+
+
+async def _entity_cmd(client, local_server, parts: list[str]) -> None:
+    """group/scene/schedule — CRUD через REST (или напрямую в --local)."""
+    ent, action = parts[0], (parts[1] if len(parts) > 1 else "list")
+    rest = parts[2:]
+
+    def _send(method: str, path: str, body=None):
+        import requests as rq
+        url = client.base + path
+        fn = getattr(rq, method.lower())
+        r = fn(url, json=body, headers=client.h, timeout=5)
+        r.raise_for_status()
+        return r.json()
+
+    if ent == "group":
+        if action == "list" or not rest:
+            _pj(_call_entities(client, local_server, "groups"))
+        elif action == "create" and len(rest) >= 2:
+            gid, pats = rest[0], rest[1].split(",")
+            sync_flag = "--sync" in rest
+            g = {"id": gid, "pattern": pats, "sync": sync_flag}
+            for tok in [t for t in rest[2:] if ":" in t and not t.startswith("--")]:
+                dev, s, ln, off = tok.split(":")
+                g.setdefault("segments", {})[dev] = {
+                    "device_id": dev, "start": int(s), "length": int(ln),
+                    "canvas_offset": int(off)}
+            res = (_send("post", "/api/v1/groups", g) if client
+                   else _local_put_group(local_server, g))
+            _pj(res)
+        elif action == "run" and rest:
+            gid, state = rest[0], _kv(rest[1:])
+            res = (_send("post", f"/api/v1/groups/{gid}/state", {"state": state})
+                   if client else await local_server.orchestrator.command_group(
+                       gid, state, _local_caller(local_server)))
+            _pj(res)
+        else:
+            console.print(HELP)
+    elif ent == "scene":
+        if action == "list":
+            _pj(_call_entities(client, local_server, "scenes"))
+        elif action == "save" and len(rest) >= 2:
+            sid, doc = rest[0], _arg_token(rest[1])
+            body = {"name": doc.get("name", ""), "steps": doc.get("steps", []),
+                    "fade_ms": doc.get("fade_ms", 0)}
+            res = (_send("put", f"/api/v1/scenes/{sid}", body) if client
+                   else _local_put_scene(local_server, sid, body))
+            _pj(res)
+        elif action == "run" and rest:
+            res = (_send("post", f"/api/v1/scenes/{rest[0]}/run") if client
+                   else await local_server.orchestrator.run_scene(
+                       rest[0], _local_caller(local_server)))
+            _pj(res)
+        else:
+            console.print(HELP)
+    elif ent == "schedule":
+        if action == "list":
+            _pj(_call_entities(client, local_server, "schedules"))
+        elif action == "add" and len(rest) >= 3:
+            sid, scene, cronish = rest[0], rest[1], " ".join(rest[2:])
+            body = {"scene_id": scene, "cronish": cronish}
+            res = (_send("put", f"/api/v1/schedules/{sid}", body) if client
+                   else _local_put_schedule(local_server, sid, body))
+            _pj(res)
+        else:
+            console.print(HELP)
+
+
+def _call_entities(client, local_server, name: str):
+    if client:
+        return client.get(f"/api/v1/{name}")
+    store = getattr(local_server.orchestrator, name)
+    return {k: v.model_dump() for k, v in store.items()}
+
+
+def _local_put_group(server, g: dict):
+    from ct.core.orchestrator import Group as G
+    from pydantic import TypeAdapter
+    server.orchestrator.groups[g["id"]] = TypeAdapter(G).validate_python(g)
+    return {"ok": g["id"]}
+
+
+def _local_put_scene(server, sid: str, body: dict):
+    from ct.core.orchestrator import Scene
+    server.orchestrator.scenes[sid] = Scene(id=sid, **body)
+    return {"ok": sid}
+
+
+def _local_put_schedule(server, sid: str, body: dict):
+    from ct.core.orchestrator import Schedule
+    server.orchestrator.schedules[sid] = Schedule(id=sid, **body)
+    return {"ok": sid}
 
 
 def _local_caller(server, admin: bool = True):

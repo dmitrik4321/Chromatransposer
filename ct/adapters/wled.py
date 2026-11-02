@@ -29,6 +29,11 @@ WLED_CONFIG = {
     "ws_reconnect_s": 5.0,          # пауза переподключения WebSocket
     "state_publish_ms": 2000,       # как часто читать /json/state для реконсиляции
     "scale_max": 255,               # родная шкала speed/intensity/palette/bri
+    "mdns": {                        # автоматический поиск узлов в LAN
+        "enabled": True,             # false -> только статические hosts из YAML
+        "service_type": "_wled._tcp.local.",
+        "timeout_s": 2.0,
+    },
     "paths": {                      # эндпоинты родного HTTP API WLED
         "info": "/json/info",
         "state": "/json/state",
@@ -67,9 +72,13 @@ class WledAdapter(SouthboundAdapter):
         found = []
         if aiohttp is None:
             return found
+        hosts = list(self.hosts)
+        for h in await self._mdns_hosts():       # дополнение к статическим host-ам
+            if h not in hosts:
+                hosts.append(h)
         timeout = aiohttp.ClientTimeout(self.cfg["http_timeout_s"])
         async with aiohttp.ClientSession(timeout=timeout) as s:
-            for host in self.hosts:
+            for host in hosts:
                 try:
                     async with s.get(f"http://{host}{self.cfg['paths']['info']}") as r:
                         info = await r.json()
@@ -79,6 +88,46 @@ class WledAdapter(SouthboundAdapter):
                 except Exception:
                     continue
         return found
+
+    async def _mdns_hosts(self) -> list[str]:
+        """mDNS-дискавери (_wled._tcp): находим узлы, не перечисленные в YAML."""
+        md = self.cfg.get("mdns", {})
+        if not md.get("enabled"):
+            return []
+        try:
+            from zeroconf import ServiceBrowser, Zeroconf
+        except ImportError:
+            return []
+
+        def _scan():
+            zc = Zeroconf()
+            hosts: list[str] = []
+            try:
+                browser = ServiceBrowser(zc, md["service_type"],
+                                         lambda *_a: None)  # noqa: F841
+                import time as _t
+                _t.sleep(md.get("timeout_s", 2.0))
+                for st in zc.get_service_info(md["service_type"], n) or []:
+                    pass
+                # проще: собрать через record cache
+                from zeroconf import DNSQuestion, TYPE_A
+                infos = zc.cache.all_by_name(None) if hasattr(zc.cache, "all_by_name") else {}
+                del infos
+                for name in zc.names():
+                    if name.endswith(md["service_type"]):
+                        info = zc.get_service_info(md["service_type"], name)
+                        if info:
+                            hosts.extend(str(ip) for ip in info.addresses)
+            finally:
+                zc.close()
+            return hosts
+
+        loop = asyncio.get_running_loop()
+        try:
+            return await asyncio.wait_for(loop.run_in_executor(None, _scan),
+                                          md.get("timeout_s", 2.0) + 2)
+        except Exception:
+            return []
 
     def _node_from_info(self, host: str, info: dict) -> DeviceNode:
         dev_id = f"wled-{info.get('id', host.replace('.', '-'))}"

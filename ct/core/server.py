@@ -21,13 +21,23 @@ from ct.core.ir import EffectIR, NativeRef, PortResult, Segment
 from ct.core.mqtt_bus import MqttBridge
 from ct.core.orchestrator import Caller, Group, Orchestrator, Scene, Schedule
 from ct.core.registry import Registry
-from ct.core.translator import ir_to_native, native_to_ir
+from ct.core.translator import configure as configure_translator, ir_to_native, native_to_ir
+
+# ------------------------------ КОНФИГ СЕРВЕРА (дефолты) ----------------------
+# Всё меняемое — здесь; переопределяется configs/server.yaml (конфиг как код).
+SERVER_CONFIG = {
+    "mqtt": {"host": "127.0.0.1", "port": 1883},   # только локальный брокер (решение D)
+    "state_dir": "state",
+    "sync": {"tick_hz": 5},                        # общий тик стендов (решение B)
+    "reconcile_interval_s": 30.0,                  # периодическая реконсиляция
+    "generic_dir": "configs/generic",              # YAML-маппинги «лапши»
+}
 
 
 class CommandQueue:
     """Очередь команд для офлайна: device_id -> deque(payload). Ретраи при появлении."""
 
-    def __init__(self, max_per_device: int = 50):
+    def __init__(self, max_per_device: int = SERVER_CONFIG.get("queue_depth", 50)):
         self.q: dict[str, collections.deque] = collections.defaultdict(
             lambda: collections.deque(maxlen=max_per_device))
 
@@ -41,7 +51,7 @@ class CommandQueue:
 
 class Server:
     def __init__(self, config_path: str = "configs/server.yaml"):
-        self.config = self._load_config(config_path)
+        self.config = {**SERVER_CONFIG, **self._load_config(config_path)}
         self.registry = Registry()
         self.bridge: Optional[MqttBridge] = None
         self.provisioning = Provisioning(self.config.get("state_dir", "state"))
@@ -59,6 +69,9 @@ class Server:
 
     # --- запуск ------------------------------------------------------------------
     async def start(self) -> None:
+        # транслятор: карты/шкалы/лестница деградации из YAML (без хардкода)
+        configure_translator(self.config.get("translator", {}))
+
         mqtt_cfg = self.config.get("mqtt", {})
         self.bridge = MqttBridge(mqtt_cfg.get("host", "127.0.0.1"),
                                  mqtt_cfg.get("port", 1883))
@@ -71,6 +84,9 @@ class Server:
             cls = ADAPTERS[spec["type"]]
             kwargs = {k: v for k, v in spec.items() if k != "type"}
             kwargs.setdefault("bridge", self.bridge)
+            if spec["type"] == "generic" and "configs" not in kwargs:
+                kwargs["configs"] = self._load_generic_configs(
+                    self.config.get("generic_dir", "configs/generic"))
             adapter = cls(**kwargs)
             self.adapters[adapter.name + "-" + str(len(self.adapters))] = adapter
             for node in await adapter.discover():
@@ -90,6 +106,29 @@ class Server:
             self.orchestrator.scenes[s["id"]] = Scene(**s)
         for sc in self.config.get("schedules", []):
             self.orchestrator.schedules[sc["id"]] = Schedule(**sc)
+        self._recon_task = asyncio.create_task(self._reconcile_loop())
+
+    @staticmethod
+    def _load_generic_configs(directory: str) -> list[dict]:
+        out = []
+        if os.path.isdir(directory):
+            for fn in sorted(os.listdir(directory)):
+                if fn.endswith((".yaml", ".yml")):
+                    with open(os.path.join(directory, fn)) as f:
+                        out.append(yaml.safe_load(f))
+        return out
+
+    async def _reconcile_loop(self) -> None:
+        """Периодическая реконсиляция desired vs reported (дрейф правится выдачей)."""
+        interval = self.config.get("reconcile_interval_s", 30.0)
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self.orchestrator.reconcile()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                continue  # офлайн-устойчивость: цикл не должен умирать
 
     def _make_state_cb(self, device_id: str):
         async def cb(state: dict) -> None:
@@ -162,6 +201,9 @@ class Server:
         raise KeyError(f"no adapter '{node.adapter}' loaded")
 
     async def stop(self) -> None:
+        recon = getattr(self, "_recon_task", None)
+        if recon:
+            recon.cancel()
         await self.orchestrator.stop_tick()
         if self.bridge:
             await self.bridge.close()
