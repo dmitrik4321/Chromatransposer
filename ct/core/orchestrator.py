@@ -91,6 +91,9 @@ class Orchestrator:
         self._desired_ir: dict[str, EffectIR] = {}     # предпросмотр: IR для ASCII-логгера
         self._reported: dict[str, dict[str, Any]] = {} # фактическое
         self._tick_task: Optional[asyncio.Task] = None
+        self._sched_task: Optional[asyncio.Task] = None
+        self._sched_last: dict[str, str] = {}          # daily/at: ключ последнего срабатывания
+        self._sched_last_ts: dict[str, float] = {}     # every Ns: время последнего запуска
         self._seq = 0
 
     # --- арбитраж -----------------------------------------------------------
@@ -178,16 +181,47 @@ class Orchestrator:
 
     async def _scheduler_loop(self) -> None:
         while True:
-            now = time.localtime()
-            for s in self.schedules.values():
-                if not s.enabled:
-                    continue
-                if s.cronish.startswith("daily"):
-                    hh, mm = map(int, s.cronish.split()[1].split(":"))
-                    if (now.tm_hour, now.tm_min) == (hh, mm):
-                        await self.run_scene(s.scene_id, Caller(id="scheduler", role="admin"))
-                        await asyncio.sleep(60)  # не запускать дважды в минуту
+            try:
+                await self._scheduler_tick()
+            except Exception:
+                continue  # офлайн-устойчивость: цикл не должен умирать
             await asyncio.sleep(1)
+
+    async def _scheduler_tick(self) -> None:
+        """Проверка расписаний (один проход). Форматы cronish:
+        - "daily HH:MM" — каждый день во столько-то;
+        - "every Ns"    — каждые N секунд от момента старта/последнего запуска;
+        - "at <ISO>"    — однократно по абсолютному времени.
+        Состояние «уже сработали» ведём в _sched_last/_sched_last_ts, чтобы
+        не запускать дважды в пределах окна.
+        """
+        now = time.time()
+        lt = time.localtime(now)
+        for s in self.schedules.values():
+            if not s.enabled or s.scene_id not in self.scenes:
+                continue
+            due = False
+            if s.cronish.startswith("daily"):
+                hh, mm = map(int, s.cronish.split()[1].split(":"))
+                key = f"daily:{hh}:{mm}"
+                due = (lt.tm_hour, lt.tm_min) == (hh, mm) and \
+                      self._sched_last.get(s.id) != key
+                if due:
+                    self._sched_last[s.id] = key
+            elif s.cronish.startswith("every"):
+                n = float(s.cronish.split()[1].rstrip("sS"))
+                last = self._sched_last_ts.get(s.id, 0.0)
+                if now - last >= n:
+                    due = True
+                    self._sched_last_ts[s.id] = now
+            elif s.cronish.startswith("at"):
+                key = s.cronish.strip()
+                ts = time.mktime(time.strptime(key.split()[1], "%Y-%m-%dT%H:%M:%S"))
+                due = now >= ts and self._sched_last.get(s.id) != key
+                if due:
+                    self._sched_last[s.id] = key   # однократно
+            if due:
+                await self.run_scene(s.scene_id, Caller(id="scheduler", role="admin"))
 
     # --- реконсиляция desired vs reported --------------------------------------
     def report_state(self, device_id: str, state: dict) -> None:
@@ -217,11 +251,17 @@ class Orchestrator:
         if self._tick_task and not self._tick_task.done():
             return
         self._tick_task = asyncio.create_task(self._tick_loop(interval_s))
+        # расписания крутятся тем же циклом-инфраструктурой оркестратора
+        if not self._sched_task or self._sched_task.done():
+            self._sched_task = asyncio.create_task(self._scheduler_loop())
 
     async def stop_tick(self) -> None:
         if self._tick_task:
             self._tick_task.cancel()
             self._tick_task = None
+        if self._sched_task:
+            self._sched_task.cancel()
+            self._sched_task = None
 
     async def _tick_loop(self, interval_s: float) -> None:
         synced_groups = [g for g in self.groups.values() if g.sync]

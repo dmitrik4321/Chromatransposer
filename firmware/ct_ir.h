@@ -34,7 +34,14 @@
 #ifndef CT_IR_H
 #define CT_IR_H
 
+#ifdef CT_HOST_TEST
+// Хостовые smoke-тесты (tests/test_firmware_host.py): g++ + заглушки Arduino/
+// ArduinoJson вместо ESP-окружения. Прошивки это не касается — макрос определён
+// только в тестовой сборке.
+#include "tests/host_stubs/Arduino.h"
+#else
 #include <Arduino.h>
+#endif
 
 #ifdef CT_NO_FASTLED
 // Прошивка без FastLED: свой тип пикселя (RGB888-совместимый).
@@ -44,7 +51,11 @@ struct TPixel { uint8_t r = 0, g = 0, b = 0; };
 typedef CRGB TPixel;
 #endif
 
+#ifdef CT_HOST_TEST
+#include "tests/host_stubs/ArduinoJson.h"
+#else
 #include <ArduinoJson.h>
+#endif
 #include <string.h>
 
 // ----------------------------------------------------------------------------

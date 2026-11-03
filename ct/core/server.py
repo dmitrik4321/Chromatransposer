@@ -162,6 +162,10 @@ class Server:
             self.orchestrator.scenes[s["id"]] = Scene(**s)
         for sc in self.config.get("schedules", []):
             self.orchestrator.schedules[sc["id"]] = Schedule(**sc)
+        # расписания (every/at/daily) живут в цикле оркестратора; тот стартует
+        # только при включённом тике, поэтому отдельный планировщик здесь
+        if self.orchestrator._sched_task is None:
+            self._sched_task = asyncio.create_task(self.orchestrator._scheduler_loop())
         self._recon_task = asyncio.create_task(self._reconcile_loop())
 
         # 2) HA: discovery-экспорт + фоновый подъём контейнера (не блокирует старт).
@@ -325,6 +329,9 @@ class Server:
         recon = getattr(self, "_recon_task", None)
         if recon:
             recon.cancel()
+        sched = getattr(self, "_sched_task", None)
+        if sched:
+            sched.cancel()
         ha_task = getattr(self, "_ha_task", None)
         if ha_task:
             ha_task.cancel()

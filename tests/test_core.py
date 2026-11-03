@@ -155,3 +155,46 @@ async def test_group_single_command_many_nodes_with_segments():
                                           "m-b": Segment(device_id="m-b", start=64, length=64, canvas_offset=64)})
     await orch.command_group("wall", {"on": True}, Caller(id="u", role="user"))
     assert sorted(got) == [("m-a", 0), ("m-b", 64)]
+
+
+# --- расписания (backlog: планировщик был мёртвым кодом) -----------------------
+
+@pytest.mark.asyncio
+async def test_schedule_every_runs_scene():
+    fired = []
+
+    async def apply_fn(dev, state, seg, ir):
+        return {}
+    reg = Registry(); reg.upsert(native_node())
+    orch = Orchestrator(reg, apply_fn)
+    from ct.core.orchestrator import Scene, Schedule
+    orch.scenes["s1"] = Scene(id="s1", steps=[{"device": "strip-ct", "state": {"on": True}}])
+    orch.schedules["r1"] = Schedule(id="r1", scene_id="s1", cronish="every 5s")
+    # однократный проход планировщика: первый тик должен запустить сцену
+    await orch._scheduler_tick()
+    assert "strip-ct" in orch._desired
+    # повторный проход сразу — не должен запускать второй раз раньше срока
+    n_before = len(orch._desired)
+    await orch._scheduler_tick()
+    assert len(orch._desired) == n_before
+
+
+@pytest.mark.asyncio
+async def test_schedule_at_fires_once_and_disabled_skipped():
+    async def apply_fn(dev, state, seg, ir):
+        return {}
+    reg = Registry(); reg.upsert(native_node())
+    orch = Orchestrator(reg, apply_fn)
+    from ct.core.orchestrator import Scene, Schedule
+    import datetime as dt
+    past = (dt.datetime.now() - dt.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    orch.scenes["s1"] = Scene(id="s1", steps=[{"device": "strip-ct", "state": {"on": True}}])
+    orch.schedules["r-at"] = Schedule(id="r-at", scene_id="s1", cronish=f"at {past}")
+    await orch._scheduler_tick()
+    assert orch._desired.get("strip-ct") == {"on": True}
+    orch._desired.clear()
+    await orch._scheduler_tick()                    # однократно — больше не firing
+    assert not orch._desired
+    orch.schedules["r-at"].enabled = False          # disabled — пропускаем
+    await orch._scheduler_tick()
+    assert not orch._desired

@@ -107,12 +107,7 @@ class WledAdapter(SouthboundAdapter):
                                          lambda *_a: None)  # noqa: F841
                 import time as _t
                 _t.sleep(md.get("timeout_s", 2.0))
-                for st in zc.get_service_info(md["service_type"], n) or []:
-                    pass
-                # проще: собрать через record cache
-                from zeroconf import DNSQuestion, TYPE_A
-                infos = zc.cache.all_by_name(None) if hasattr(zc.cache, "all_by_name") else {}
-                del infos
+                # собираем имена сервиса из кэша zeroconf и резолвим адреса
                 for name in zc.names():
                     if name.endswith(md["service_type"]):
                         info = zc.get_service_info(md["service_type"], name)
