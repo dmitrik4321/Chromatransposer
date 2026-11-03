@@ -102,7 +102,8 @@ struct CtIrConfig {
 // ----------------------------------------------------------------------------
 
 // ---- Родные классы эффектов (совпадают со строками EffectIR.class) ----------
-enum class CtClass : uint8_t {
+// Plain enum (не enum class): значения нужны и как int для индексации имён.
+enum CtClass : uint8_t {
     Off = 0, Static, Perlin, Plasma, Fire, Rain, Twinkle, Rainbow,
     Sweep, Gradient, Stripe, Custom,   // Custom — hook прошивки под своё
     COUNT
@@ -184,8 +185,7 @@ public:
     // Возвращает false, если JSON не распарсился (сервер увидит это по state).
     bool applyJson(const char* json, size_t len) {
         JsonDocument doc;  // ArduinoJson v7: пул растёт сам, лимит — cfg.json_capacity
-        DeserializationError err = deserializeJson(doc, json, len,
-                                                   DeserializationOption::NoDefault);
+        DeserializationError err = deserializeJson(doc, json, len);
         if (err) return false;
         last_cmd_ms_ = millis();
         in_fallback_ = false;
@@ -275,9 +275,6 @@ public:
 
     // ---------------- Хуки рендера (переопределить в прошивке) ----------------
     // Прошивка регистрирует callback'и; CtIr вызывает их из своего loop-кода.
-    using RenderFn = void (*)(const CtSnapshot&, TPixel* out, uint16_t n);
-    using FallbackFn = void (*)(TPixel* out, uint16_t n);
-
     struct CtSnapshot {
         CtClass    cls;
         CtParams   params;
@@ -288,6 +285,9 @@ public:
         uint8_t    sensor_count;
         bool       in_fallback;
     };
+
+    using RenderFn = void (*)(const CtSnapshot&, TPixel* out, uint16_t n);
+    using FallbackFn = void (*)(TPixel* out, uint16_t n);
 
     void onRender(RenderFn fn)        { render_fn_ = fn; }
     void onFallback(FallbackFn fn)    { fallback_fn_ = fn; }
@@ -403,13 +403,13 @@ private:
     template <typename Obj>
     static uint16_t getU16(Obj o, const char* k, uint16_t def) {
         if (!o || o[k].isNull()) return def;
-        long v = o[k].as<long>();
+        long v = o[k].template as<long>();
         return (uint16_t)(v < 0 ? 0 : (v > 65535 ? 65535 : v));
     }
     uint32_t base_wall_ms_ = 0;
 };
 
-extern CtIr ctIr;  // объявить в .ino: CtIr ctIr;
+// Единственный экземпляр объявляет прошивка (см. firmware/ct_native): CtIr ctIr;
 
 // ----------------------------------------------------------------------------
 // ИНТЕГРАЦИЯ (минимальный дифф в чужие прошивки — ровно 4 места)
