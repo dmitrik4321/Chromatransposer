@@ -333,8 +333,111 @@ def _local_caller(server, admin: bool = True):
     return Caller(id="cli-local", role="admin" if admin else "user")
 
 
+# ------------------------- ОБЁРТКА ASCII-ЛОГГЕРА (REPL) -----------------------
+# Два режима, один интерфейс start/stop для handle_line("render on|off"):
+#  * --local: snapshot берётся напрямую из оркестратора (desired-IR + сегменты);
+#  * удалённый: периодический опрос GET /api/v1/render/snapshot (tokio-подобный
+#    фоновый task; requests блокирует только свой task, ввод не трогается).
+class RenderSnapshotSource:
+    def __init__(self, client=None, local_server=None):
+        self.client = client
+        self.server = local_server
+
+    def snapshot(self):
+        """-> list[(node, ir_or_None, seg_map)] — контракт FrameLogger.start."""
+        if self.server is not None:
+            reg, orch = self.server.registry, self.server.orchestrator
+            segs: dict = {}
+            for g in orch.groups.values():
+                segs.update(g.segments)
+            return [(node, orch.desired_ir(node.id), segs) for node in reg.all()]
+        # удалённый режим: сервер уже посчитал строки кадров; превращаем их
+        # в «готовые линии» через fake-node с нулевым IR нельзя — честнее
+        # переиспользовать lines как есть: оборачиваем строки псевдо-узлом.
+        data = self.client.get("/api/v1/render/snapshot")
+        out = []
+        for d in data.get("devices", []):
+            out.append(_RemoteLines(d["device"], d.get("lines", [])))
+        return out
+
+
+class _RemoteLines:
+    """Адаптер: готовый кадр сервера -> тот же протокол, что render_device_frame.
+
+    FrameLogger вызывает render_device_frame(node, ir, t, cfg, segs); для
+    удалённого режима мы подменяем snapshot_fn целиком (см. _make_logger),
+    поэтому этот класс нужен только чтобы не выдумывать узел-призрак.
+    """
+    def __init__(self, device_id: str, lines: list[str]):
+        self.id = device_id
+        self.lines = lines
+
+
+def _make_logger(client, local_server):
+    from ct.core.render import FrameLogger, RENDER_CONFIG
+    zone_h = CLI_CONFIG.get("render_zone_height", 24)
+    logger = FrameLogger(console, zone_height=zone_h)
+
+    src = RenderSnapshotSource(client=client, local_server=local_server)
+    if local_server is not None:
+        # локально: штатный цикл FrameLogger (общий тик wall-clock, стирание)
+        orig_start = logger.start
+
+        async def start_local(only_device=None):
+            await orig_start(src.snapshot, only_device=only_device)
+        logger.start = start_local  # type: ignore[assignment]
+        return logger
+
+    # удалённо: свой цикл с частотой из конфига и HTTP-опросом
+    async def start_remote(only_device=None):
+        if logger.enabled:
+            return
+        logger.only_device = only_device
+        logger.enabled = True
+
+        async def loop():
+            period = 1.0 / max(1.0, CLI_CONFIG.get("render_fps_remote", 5.0))
+            while logger.enabled:
+                lines: list[str] = []
+                try:
+                    data = src.snapshot()
+                    for item in data:
+                        if only_device and item.id != only_device:
+                            continue
+                        lines += item.lines
+                        lines.append("")
+                except Exception as e:
+                    lines = [f"\x1b[31mrender error: {e}\x1b[0m"]
+                logger.zone.draw(lines[: logger.zone.height + 8])
+                await asyncio.sleep(period)
+        logger._task = asyncio.create_task(loop())
+
+    async def stop():
+        logger.enabled = False
+        if logger._task:
+            logger._task.cancel()
+            try:
+                await logger._task
+            except asyncio.CancelledError:
+                pass
+            logger._task = None
+        logger.zone.erase()
+
+    logger.start = start_remote  # type: ignore[assignment]
+    logger.stop = stop           # type: ignore[assignment]
+    return logger
+
+
 async def repl_loop(client, local_server) -> None:
     console.print("[bold cyan]Chromatransposer CLI[/] (help — список команд)")
+    frame_logger = _make_logger(client, local_server)
+    try:
+        await _repl_inner(client, local_server, frame_logger)
+    finally:
+        await frame_logger.stop()
+
+
+async def _repl_inner(client, local_server, frame_logger) -> None:
     while True:
         try:
             line = console.input("[bold green]ct>[/] ")
@@ -346,7 +449,7 @@ async def repl_loop(client, local_server) -> None:
         if parts[0] in ("quit", "exit"):
             break
         try:
-            await handle_line(client, local_server, parts)
+            await handle_line(client, local_server, parts, frame_logger)
         except requests.HTTPError as e:
             console.print(f"[red]{e.response.status_code}: {e.response.text}[/]")
         except Exception as e:

@@ -123,6 +123,13 @@ class Orchestrator:
         self._desired[device_id] = state
         if ir is not None:
             self._desired_ir[device_id] = ir   # ASCII-логгер рисует именно desired
+        elif state:
+            # плоская команда k=v: выводим её через тот же translator, чтобы
+            # предпросмотр не врал «нет IR» там, где эффект явно назван
+            from ct.core.state_ir import state_to_ir
+            derived = state_to_ir(state, node.ecosystem.value)
+            if derived is not None:
+                self._desired_ir[device_id] = derived
         self.record_capture(device_id, caller)
         return result
 

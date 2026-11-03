@@ -187,6 +187,23 @@ def effect_pixel(cls: str, params, u: float, v: float, t: float,
     if cls == "composition":
         # деградационная композиция: просто мягкая волна по палитре
         return u * scale + phase * 0.3, 0.6 + 0.4 * math.sin(phase)
+    if cls == "sparkle":
+        # gyverlamp2 confetti/particles: редкие вспышки случайных пикселей
+        tw = _hash_noise(int(u * length) + int(t * (2 + speed * 8)))
+        thr = 1 - 0.08 - density * 0.25
+        return 0.75, 1.0 if tw > thr else 0.05
+    if cls == "swirl":
+        # gyverlamp2 tornado/cycle: вращающийся градиент по углу/длине
+        ang = (u + v * 0.5) * 2 - phase * 0.6
+        return ang % 1.0, 0.7 + 0.3 * math.sin(ang * math.pi * 2)
+    if cls == "clock":
+        # gyverlamp2 clock: время как цвет; для ASCII это статичная плашка
+        h = (t / 3600.0) % 1.0
+        return h, 0.9
+    if cls == "gradient":
+        # двухполосный градиент с медленным дрейфом
+        g = abs(((u + phase * 0.1) % 1.0) * 2 - 1)
+        return g, 0.6 + 0.4 * g
     # custom/opaque — нейтральная волна, честно помечается потерей выше
     return u + phase * 0.1, 0.8
 

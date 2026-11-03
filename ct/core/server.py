@@ -110,6 +110,9 @@ class Server:
         configure_translator(self.config.get("translator", {}))
         # ASCII-предпросмотр: рендер-конфиг тоже из YAML
         configure_render({**RENDER_CONFIG, **self.config.get("render", {})})
+        # плоское состояние -> IR для предпросмотра (ключи разбора из YAML)
+        from ct.core.state_ir import configure as configure_state_ir
+        configure_state_ir(self.config.get("state_ir", {}))
 
         mqtt_cfg = self.config.get("mqtt", {})
         # если брокер встроенный — клиент моста идёт на фактический bind-адрес
