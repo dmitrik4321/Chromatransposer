@@ -85,7 +85,7 @@ inline NodePtr parseArray(const char*& p) {
         n->arr.push_back(el);
         skipws(p);
         if (*p == ',') { ++p; continue; }
-        if (*p == ']') { ++p; break; }
+        if (*p == ']') { ++p; return n; }
         return nullptr;
     }
     return nullptr;  // обрыв внутри массива

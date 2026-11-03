@@ -49,3 +49,11 @@ SSID/пароль и `shared_key`; далее подключается к лок
 - Рендер эффектов — родной код прошивки; прослойка никогда не шлёт пиксельные буферы
   (DDP/Art-Net вне MVP, см. README).
 - Watchdog: нет команд > N сек → переход в fallback-сцену из flash.
+
+## Хостовые smoke-тесты ct_ir.h (без железа)
+Переносимая логика заголовка (парсинг IR-JSON, палитра, sync tick, watchdog-
+fallback) проверяется на ПК: `pytest tests/test_firmware_host.py`. Сборка идёт
+g++ с заглушками `tests/host_stubs/` (Arduino.h, ArduinoJson.h — минимальный
+API, ровно то, что трогает ct_ir.h) и `-DCT_HOST_TEST -DCT_NO_FASTLED`.
+Тестовая программа: `tests/firmware_smoke.cpp`. Это НЕ эмуляция ESP: для
+реальных плат по-прежнему нужен PlatformIO (native_ct) или форки WLED/Gyver.
