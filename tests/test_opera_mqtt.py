@@ -169,7 +169,7 @@ def test_discovery_effect_list_excludes_panic(adapter):
     node = a._nodes["gx"]
     exp = HaDiscoveryExporter(br, FakeRegistry(), adapters={a.name: a})
     run(exp.publish_device(node))
-    cfg = [p for t, p, r in br.published if t.endswith("light/config")][-1]
+    cfg = [p for t, p, r in br.published if t.endswith("/light/chromatransposer-opera-gx-mqtt-gx/config")][-1]
     assert "panic_mode" not in cfg["effect_list"]
     assert "blink" in cfg["effect_list"]
 
@@ -182,7 +182,10 @@ def test_discovery_no_adapters_still_works(adapter):
     node = a._nodes["gx"]
     exp = HaDiscoveryExporter(br, FakeRegistry())
     run(exp.publish_device(node))
-    cfgs = [(t, p) for t, p, r in br.published if t.endswith("light/config")]
+    cfgs = [(t, p) for t, p, r in br.published if t.endswith("/light/chromatransposer-opera-gx-mqtt-gx/config")]
     assert cfgs, f"discovery-конфиг не опубликован; topics={[t for t,_,_ in br.published]}"
     cfg = cfgs[-1][1]
-    assert "panic_mode" in cfg["effect_list"]   # без политики — как есть
+    # без политики panic_mode не попадает в effect_list в любом случае
+    # (это switch расширения, а не эффект; см. native_effects адаптера).
+    assert "blink" in cfg["effect_list"]
+    assert not any("panic" in e and e != "panic_off" for e in cfg["effect_list"])
