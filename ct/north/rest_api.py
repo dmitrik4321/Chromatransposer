@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
@@ -133,6 +134,18 @@ async def port_effect(body: PortBody, caller: Caller = Depends(get_caller)):
 
 
 # --- groups / scenes / schedules ---------------------------------------------
+class SceneBody(BaseModel):
+    name: str = ""
+    steps: list[dict] = []
+    fade_ms: int = 0
+
+
+class ScheduleBody(BaseModel):
+    scene_id: str
+    cronish: str            # "daily HH:MM" | "every Ns" | "at ISO"
+    enabled: bool = True
+
+
 @app.get("/api/v1/groups")
 def groups(caller: Caller = Depends(get_caller)):
     return {gid: g.model_dump() for gid, g in server.orchestrator.groups.items()}
@@ -144,6 +157,59 @@ def put_group(g: Group, caller: Caller = Depends(get_caller)):
         raise HTTPException(403, "admin required to define topology")
     server.orchestrator.groups[g.id] = g
     return {"ok": g.id}
+
+
+@app.delete("/api/v1/groups/{group_id}")
+def del_group(group_id: str, caller: Caller = Depends(get_caller)):
+    if not caller.is_admin:
+        raise HTTPException(403, "admin required")
+    server.orchestrator.groups.pop(group_id, None)
+    return {"removed": group_id}
+
+
+@app.get("/api/v1/scenes")
+def scenes(caller: Caller = Depends(get_caller)):
+    return {sid: s.model_dump() for sid, s in server.orchestrator.scenes.items()}
+
+
+@app.put("/api/v1/scenes/{scene_id}")
+def put_scene(scene_id: str, body: SceneBody, caller: Caller = Depends(get_caller)):
+    if not caller.is_admin:
+        raise HTTPException(403, "admin required to define scenes")
+    server.orchestrator.scenes[scene_id] = Scene(id=scene_id, **body.model_dump())
+    return {"ok": scene_id}
+
+
+@app.delete("/api/v1/scenes/{scene_id}")
+def del_scene(scene_id: str, caller: Caller = Depends(get_caller)):
+    if not caller.is_admin:
+        raise HTTPException(403, "admin required")
+    server.orchestrator.scenes.pop(scene_id, None)
+    return {"removed": scene_id}
+
+
+@app.get("/api/v1/schedules")
+def schedules(caller: Caller = Depends(get_caller)):
+    return {scid: s.model_dump() for scid, s in server.orchestrator.schedules.items()}
+
+
+@app.put("/api/v1/schedules/{schedule_id}")
+def put_schedule(schedule_id: str, body: ScheduleBody,
+                 caller: Caller = Depends(get_caller)):
+    if not caller.is_admin:
+        raise HTTPException(403, "admin required")
+    if body.scene_id not in server.orchestrator.scenes:
+        raise HTTPException(404, "unknown scene")
+    server.orchestrator.schedules[schedule_id] = Schedule(id=schedule_id, **body.model_dump())
+    return {"ok": schedule_id}
+
+
+@app.delete("/api/v1/schedules/{schedule_id}")
+def del_schedule(schedule_id: str, caller: Caller = Depends(get_caller)):
+    if not caller.is_admin:
+        raise HTTPException(403, "admin required")
+    server.orchestrator.schedules.pop(schedule_id, None)
+    return {"removed": schedule_id}
 
 
 @app.post("/api/v1/groups/{group_id}/state")
@@ -176,6 +242,34 @@ async def reconcile(caller: Caller = Depends(get_caller)):
 @app.get("/api/v1/telemetry")
 def telemetry(caller: Caller = Depends(get_caller)):
     return server.telemetry_latest
+
+
+@app.get("/api/v1/render/snapshot")
+def render_snapshot(caller: Caller = Depends(get_caller)):
+    """Кадры ASCII-предпросмотра для удалённого CLI.
+
+    Честно: это ПРЕДПОЛОЖЕНИЕ сервера по desired-IR (control plane), а не
+    снимок реальной ленты; точность зависит от адаптеров.
+    """
+    from ct.core.render import classify_device, render_device_frame
+    t = time.time()
+    out = []
+    for node in server.registry.all():
+        ir = server.orchestrator.desired_ir(node.id)
+        segs = {}
+        for g in server.orchestrator.groups.values():
+            segs.update(g.segments)
+        lines = render_device_frame(node, ir, t, seg_map=segs)
+        out.append({"device": node.id, "type": classify_device(node),
+                    "lines": lines})
+    return {"t": t, "devices": out}
+
+
+@app.get("/api/v1/status")
+def status(caller: Caller = Depends(get_caller)):
+    """Состояние инфраструктуры: встроенный MQTT-брокер и HA (требование:
+    прослойка сама поднимает оба)."""
+    return {"ok": True, **server.infra_status()}
 
 
 # --- provisioning ------------------------------------------------------------

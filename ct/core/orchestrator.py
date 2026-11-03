@@ -88,6 +88,7 @@ class Orchestrator:
         self.schedules: dict[str, Schedule] = {}
         self._captures: dict[str, Capture] = {}      # desired-state арбитраж
         self._desired: dict[str, dict[str, Any]] = {}  # реконсиляция: желаемое
+        self._desired_ir: dict[str, EffectIR] = {}     # предпросмотр: IR для ASCII-логгера
         self._reported: dict[str, dict[str, Any]] = {} # фактическое
         self._tick_task: Optional[asyncio.Task] = None
         self._seq = 0
@@ -120,8 +121,20 @@ class Orchestrator:
         seg = segment or self._segment_for(device_id)
         result = await self.apply(device_id, state, seg, ir)
         self._desired[device_id] = state
+        if ir is not None:
+            self._desired_ir[device_id] = ir   # ASCII-логгер рисует именно desired
+        elif state:
+            # плоская команда k=v: выводим её через тот же translator, чтобы
+            # предпросмотр не врал «нет IR» там, где эффект явно назван
+            from ct.core.state_ir import state_to_ir
+            derived = state_to_ir(state, node.ecosystem.value)
+            if derived is not None:
+                self._desired_ir[device_id] = derived
         self.record_capture(device_id, caller)
         return result
+
+    def desired_ir(self, device_id: str) -> Optional[EffectIR]:
+        return self._desired_ir.get(device_id)
 
     async def command_group(self, group_id: str, state: dict, caller: Caller,
                             ir: Optional[EffectIR] = None) -> dict:

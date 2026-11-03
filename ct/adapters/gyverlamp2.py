@@ -32,15 +32,35 @@ from ct.core.registry import (DeviceNode, Endpoint, Ecosystem, OnlineState,
 
 log = logging.getLogger("ct.adapter.gyverlamp2")
 
-# IR-класс -> effect id прошивки (только то, что реально есть в Glade-прошивке)
-CLASS_TO_FIRMWARE: dict[str, int] = {
-    "perlin": gl.FirmwareEffect.PERLIN,
-    "static": gl.FirmwareEffect.COLOR,        # static == color с фикс. оттенком
-    "colorsweep": gl.FirmwareEffect.CYCLE,
-    "fire": gl.FirmwareEffect.FIRE,
-    "twinkle": gl.FirmwareEffect.PARTICLES,   # частицы ≈ мерцание (потеря декларируется)
-    "rainbow": gl.FirmwareEffect.CYCLE,       # радуга циклом палитры rainbow
+# ------------------------------ КОНФИГ АДАПТЕРА ------------------------------
+# Всё меняемое — здесь; сервер переопределяет любой ключ секцией
+# adapters[].config в configs/server.yaml (GyverLamp2Adapter(config=...)).
+GYVERLAMP2_CONFIG = {
+    "heartbeat_timeout_s": 3.0,   # offline-детекция: heartbeat каждые ~500 мс
+    "default_group": 1,           # группа UDP «GL» (порт выводится из group+key)
+    "default_key": "GL",
+    # IR-класс -> effect id прошивки (только то, что реально есть в Glade-прошивке;
+    # неизвестные классы — честный unsupported, молчаливой подмены нет).
+    # Ключи = значения EffectClass (ct/core/ir.py), ids = FirmwareEffect из протокола.
+    "ir_class_map": {
+        "perlin": 1,          # PERLIN
+        "static": 2,          # COLOR == static с фиксированным оттенком
+        "colorsweep": 3,      # CYCLE
+        "gradient": 4,        # GRADIENT
+        "twinkle": 5,         # PARTICLES ≈ мерцание (потеря декларируется)
+        "fire": 6,            # FIRE
+        "rainbow": 3,         # радуга циклом палитры rainbow (lossy)
+    },
+    # дефолты банка режимов GL,2 (полная запись — декларированная семантика)
+    "mode_defaults": {
+        "brightness_byte": 255, "speed_byte": 128, "scale_byte": 128,
+        "adv_mode": 1, "sound_react": 1, "react_min": 0, "react_max": 255,
+        "fade_bright": 0,
+    },
 }
+# ------------------------------------------------------------------------------
+
+CLASS_TO_FIRMWARE: dict[str, int] = GYVERLAMP2_CONFIG["ir_class_map"]
 
 
 class _UdpHeartbeatProtocol(asyncio.DatagramProtocol):
@@ -59,12 +79,16 @@ class GyverLamp2Adapter(SouthboundAdapter):
     ecosystem = "gyverlamp2"
 
     def __init__(self, lamps: Optional[dict[str, dict]] = None, bridge=None,
-                 group: int = 1, key: str = "GL", listen: bool = True):
+                 group: Optional[int] = None, key: Optional[str] = None,
+                 listen: bool = True, config: Optional[dict] = None):
         """lamps: {device_id: {"ip": "192.168.1.51", "group": 1?, "key": "GL"?}}."""
+        self.cfg = {**GYVERLAMP2_CONFIG, **(config or {})}   # YAML поверх дефолтов
+        self.cfg["ir_class_map"] = {**GYVERLAMP2_CONFIG["ir_class_map"],
+                                    **((config or {}).get("ir_class_map") or {})}
         self.lamp_cfg = lamps or {}
         self.bridge = bridge
-        self.group = group
-        self.key = key
+        self.group = group if group is not None else self.cfg["default_group"]
+        self.key = key if key is not None else self.cfg["default_key"]
         self.listen = listen
         self._nodes: dict[str, DeviceNode] = {}
         self._last_preset: dict[str, int] = {}
@@ -157,7 +181,8 @@ class GyverLamp2Adapter(SouthboundAdapter):
     async def capabilities(self, device_id: str) -> DeviceNode:
         node = self._nodes[device_id]
         node.online = (OnlineState.ONLINE
-                       if time.time() - node.last_seen < 3.0 else OnlineState.UNKNOWN)
+                       if time.time() - node.last_seen < self.cfg["heartbeat_timeout_s"]
+                       else OnlineState.UNKNOWN)
         return node
 
     async def get_state(self, device_id: str) -> dict[str, Any]:
@@ -194,22 +219,24 @@ class GyverLamp2Adapter(SouthboundAdapter):
 
     async def _apply_named_effect(self, device_id: str, state: dict) -> dict[str, Any]:
         """Эффект по имени: пишем банк режимов GL,2 (полная замена, 10 слотов)
-        и выбираем слот. Это декларированная запись — не молчаливая подмена."""
+        и выбираем слот. Это декларированная запись — не молчаливая подмена.
+        Дефолты полей режима — в GYVERLAMP2_CONFIG['mode_defaults'] (YAML)."""
         name = str(state["effect"]).lower()
         fid = gl.KEY_TO_EFFECT.get(name)
         if fid is None:
             raise UnsupportedError(f"GyverLamp2: неизвестный родной эффект '{name}'")
+        d = self.cfg["mode_defaults"]
         row = [0] * gl.MODE_FIELDS
         row[gl.ModeField.EFFECT] = fid
-        row[gl.ModeField.FADE_BRIGHT] = 0
-        row[gl.ModeField.BRIGHTNESS] = int(state.get("brightness_byte", 255))
-        row[gl.ModeField.ADV_MODE] = 1
-        row[gl.ModeField.SOUND_REACT] = 1
-        row[gl.ModeField.REACT_MIN] = 0
-        row[gl.ModeField.REACT_MAX] = 255
-        row[gl.ModeField.SPEED] = int(state.get("speed_byte", 128))
+        row[gl.ModeField.FADE_BRIGHT] = d["fade_bright"]
+        row[gl.ModeField.BRIGHTNESS] = int(state.get("brightness_byte", d["brightness_byte"]))
+        row[gl.ModeField.ADV_MODE] = d["adv_mode"]
+        row[gl.ModeField.SOUND_REACT] = d["sound_react"]
+        row[gl.ModeField.REACT_MIN] = d["react_min"]
+        row[gl.ModeField.REACT_MAX] = d["react_max"]
+        row[gl.ModeField.SPEED] = int(state.get("speed_byte", d["speed_byte"]))
         row[gl.ModeField.PALETTE] = gl.palette_id(state.get("palette", "rainbow"))
-        row[gl.ModeField.SCALE] = int(state.get("scale_byte", 128))
+        row[gl.ModeField.SCALE] = int(state.get("scale_byte", d["scale_byte"]))
         bank = [tuple(row)]
         await self._send(device_id, gl.mode_bank_packet(bank, selected=0))
         rep = {"on": True, "effect": name}

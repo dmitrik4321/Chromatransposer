@@ -7,6 +7,10 @@
                            команды идут напрямую в Server-объект)
 
 Команды консоли см. HELP; история/табы не входят в MVP.
+
+ASCII-предпросмотр (`render on`): фоновый task рисует кадры desired-IR в
+отдельной зоне над prompt, стирая предыдущий ANSI-стиранием; ввод команд
+не блокируется (см. ct.core.render.FrameLogger).
 """
 from __future__ import annotations
 
@@ -21,6 +25,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+# ------------------------------ КОНФИГ CLI (дефолты) --------------------------
+# Всё меняемое — здесь; переопределяется секцией `cli:` configs/server.yaml
+# (в --local) или ключами запуска.
+CLI_CONFIG = {
+    "url": "http://127.0.0.1:8300",
+    "render_fps_remote": 5.0,     # удалённый режим: опрос /api/v1/render/snapshot
+    "render_zone_height": 24,     # строк зоны предпросмотра
+}
+
 console = Console()
 
 HELP = """
@@ -31,6 +44,8 @@ HELP = """
   set <device> k=v [k=v ...]     команда (on=true bri=128)
   ir <device> <json|@file>       применить EffectIR напрямую (native_ct/generic)
   port <src_json> <dst_device>   портирование native->IR->native
+  render on|off [device]         ASCII-предпросмотр «что должно быть на ленте»
+                                 (общий тик, новый кадр стирает старый)
   group create <id> <pat,...> [--sync] [seg:dev=start:len:off,...]
   group run <id> k=v [...]       одна команда — много узлов
   scene save <id> <json|@file> | scene run <id>
@@ -38,6 +53,7 @@ HELP = """
   reconcile                      desired vs reported, правка дрейфа
   telemetry                      последние данные сенсоров (звук и т.п.)
   release <device>               снять админ-захват
+  status                         сервер + MQTT-брокер + HA (режим/ready/ошибка)
   provision window devices|tokens on|off
   provision usb <device_id> <ssid> <wifi_pass>   (только --local)
   token issue <caller> user|admin
@@ -80,6 +96,14 @@ def _arg_token(s: str) -> dict:
     return json.loads(s)
 
 
+def _pj(obj) -> None:
+    """Печать JSON (dict или готовая JSON-строка) через Rich."""
+    if isinstance(obj, str):
+        console.print_json(json=obj)
+    else:
+        console.print_json(data=obj)
+
+
 def render_devices(rows) -> None:
     t = Table(title="Устройства")
     for col in ("id", "экосистема", "адаптер", "топология", "IR", "сегм.", "онлайн"):
@@ -94,31 +118,42 @@ def render_devices(rows) -> None:
     console.print(t)
 
 
-async def handle_line(client: CliClient | None, local_server, parts: list[str]) -> None:
+async def handle_line(client: CliClient | None, local_server, parts: list[str],
+                      frame_logger=None) -> None:
     cmd = parts[0] if parts else ""
     args = parts[1:]
 
-    if cmd == "devices":
+    if cmd == "render" and args:
+        if frame_logger is None:
+            console.print("[red]предпросмотр недоступен[/]")
+        elif args[0] == "on":
+            only = args[1] if len(args) > 1 else None
+            await frame_logger.start(only_device=only)
+            console.print(f"[green]render on[/]"
+                          + (f" (только {only})" if only else ""))
+        else:
+            await frame_logger.stop()
+            console.print("[yellow]render off[/]")
+    elif cmd == "devices":
         render_devices(client.get("/api/v1/devices") if client
                        else [d.model_dump() for d in local_server.registry.all()])
     elif cmd == "caps" and args:
         if client:
-            console.print_json(json=client.get(f"/api/v1/devices/{args[0]}"))
+            _pj(client.get(f"/api/v1/devices/{args[0]}"))
         else:
             node = await local_server._adapter_for(
                 local_server.registry.get(args[0])).capabilities(args[0])
-            console.print_json(node.model_dump_json())
+            _pj(node.model_dump_json())
     elif cmd == "state" and args:
-        console.print_json(json=(client.get(f"/api/v1/devices/{args[0]}/state") if client
-                                 else await local_server.registry.get(args[0]) and
-                                      local_server._adapter_for(local_server.registry.get(args[0]))
-                                      .get_state(args[0])))
+        _pj(client.get(f"/api/v1/devices/{args[0]}/state") if client
+            else await local_server._adapter_for(
+                local_server.registry.get(args[0])).get_state(args[0]))
     elif cmd == "set" and len(args) >= 2:
         body = {"state": _kv(args[1:])}
         res = (client.post(f"/api/v1/devices/{args[0]}/state", body) if client
                else await local_server.orchestrator.command_device(
                    args[0], body["state"], _local_caller(local_server)))
-        console.print_json(json=res)
+        _pj(res)
     elif cmd == "ir" and len(args) >= 2:
         ir = _arg_token(args[1])
         body = {"ir": ir}
@@ -126,7 +161,7 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
                else await local_server.orchestrator.command_device(
                    args[0], {}, _local_caller(local_server),
                    __import__("ct.core.ir", fromlist=["EffectIR"]).EffectIR(**ir)))
-        console.print_json(json=res)
+        _pj(res)
     elif cmd == "port" and len(args) >= 2:
         src = _arg_token(args[0])
         body = {"source": src, "target_device": args[1]}
@@ -134,13 +169,25 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
                else local_server.port_native(
                    __import__("ct.core.ir", fromlist=["NativeRef"]).NativeRef(**src),
                    args[1]).model_dump())
-        console.print_json(json=res)
+        _pj(res)
     elif cmd == "reconcile":
-        console.print_json(json=(client.post("/api/v1/reconcile") if client
-                                 else await local_server.orchestrator.reconcile()))
+        _pj(client.post("/api/v1/reconcile") if client
+            else await local_server.orchestrator.reconcile())
     elif cmd == "telemetry":
-        console.print_json(json=(client.get("/api/v1/telemetry") if client
-                                 else local_server.telemetry_latest))
+        _pj(client.get("/api/v1/telemetry") if client
+            else local_server.telemetry_latest)
+    elif cmd == "status":
+        st = (client.get("/api/v1/status") if client
+              else {"ok": True, **local_server.infra_status()})
+        brk, ha = st["mqtt_broker"], st["homeassistant"]
+        console.print(f"MQTT: {'встроенный' if brk['embedded'] else 'внешний'} "
+                      f"[{'green' if brk['running'] else 'red'}]"
+                      f"{'работает' if brk['running'] else 'НЕ работает'}[/] ({brk['bind']})")
+        mark = "[green]готов[/]" if ha["ready"] else "[yellow]не готов[/]"
+        console.print(f"HA: режим={ha['mode']} {mark} url={ha['url']}"
+                      + (f" runtime={ha['runtime']}" if ha.get("runtime") else ""))
+        if ha.get("error"):
+            console.print(f"  [red]ошибка:[/] {ha['error']}")
     elif cmd == "release" and args:
         from ct.core.orchestrator import Caller
         if client:
@@ -171,7 +218,7 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
         sig = local_server.provisioning.admin_secret if not client else ""
         body = {"which": which, "opened": onoff == "on", "admin_signature": sig}
         if client:
-            console.print_json(json=client.post("/api/v1/provision/windows", body))
+            _pj(client.post("/api/v1/provision/windows", body))
         else:
             local_server.provisioning.set_window(which, onoff == "on", sig)
             console.print(f"[green]window {which}: {onoff}[/]")
@@ -184,9 +231,101 @@ async def handle_line(client: CliClient | None, local_server, parts: list[str]) 
             tok = local_server.provisioning.issue_token(caller_id, role, sig)
             console.print(Panel(tok.model_dump_json(indent=2), title="API токен"))
     elif cmd in ("group", "scene", "schedule"):
-        console.print("[yellow]заглушка v0.2: используйте REST /api/v1/groups|scenes[/]")
+        await _entity_cmd(client, local_server, parts)
     else:
         console.print(HELP)
+
+
+async def _entity_cmd(client, local_server, parts: list[str]) -> None:
+    """group/scene/schedule — CRUD через REST (или напрямую в --local)."""
+    ent, action = parts[0], (parts[1] if len(parts) > 1 else "list")
+    rest = parts[2:]
+
+    def _send(method: str, path: str, body=None):
+        import requests as rq
+        url = client.base + path
+        fn = getattr(rq, method.lower())
+        r = fn(url, json=body, headers=client.h, timeout=5)
+        r.raise_for_status()
+        return r.json()
+
+    if ent == "group":
+        if action == "list" or not rest:
+            _pj(_call_entities(client, local_server, "groups"))
+        elif action == "create" and len(rest) >= 2:
+            gid, pats = rest[0], rest[1].split(",")
+            sync_flag = "--sync" in rest
+            g = {"id": gid, "pattern": pats, "sync": sync_flag}
+            for tok in [t for t in rest[2:] if ":" in t and not t.startswith("--")]:
+                dev, s, ln, off = tok.split(":")
+                g.setdefault("segments", {})[dev] = {
+                    "device_id": dev, "start": int(s), "length": int(ln),
+                    "canvas_offset": int(off)}
+            res = (_send("post", "/api/v1/groups", g) if client
+                   else _local_put_group(local_server, g))
+            _pj(res)
+        elif action == "run" and rest:
+            gid, state = rest[0], _kv(rest[1:])
+            res = (_send("post", f"/api/v1/groups/{gid}/state", {"state": state})
+                   if client else await local_server.orchestrator.command_group(
+                       gid, state, _local_caller(local_server)))
+            _pj(res)
+        else:
+            console.print(HELP)
+    elif ent == "scene":
+        if action == "list":
+            _pj(_call_entities(client, local_server, "scenes"))
+        elif action == "save" and len(rest) >= 2:
+            sid, doc = rest[0], _arg_token(rest[1])
+            body = {"name": doc.get("name", ""), "steps": doc.get("steps", []),
+                    "fade_ms": doc.get("fade_ms", 0)}
+            res = (_send("put", f"/api/v1/scenes/{sid}", body) if client
+                   else _local_put_scene(local_server, sid, body))
+            _pj(res)
+        elif action == "run" and rest:
+            res = (_send("post", f"/api/v1/scenes/{rest[0]}/run") if client
+                   else await local_server.orchestrator.run_scene(
+                       rest[0], _local_caller(local_server)))
+            _pj(res)
+        else:
+            console.print(HELP)
+    elif ent == "schedule":
+        if action == "list":
+            _pj(_call_entities(client, local_server, "schedules"))
+        elif action == "add" and len(rest) >= 3:
+            sid, scene, cronish = rest[0], rest[1], " ".join(rest[2:])
+            body = {"scene_id": scene, "cronish": cronish}
+            res = (_send("put", f"/api/v1/schedules/{sid}", body) if client
+                   else _local_put_schedule(local_server, sid, body))
+            _pj(res)
+        else:
+            console.print(HELP)
+
+
+def _call_entities(client, local_server, name: str):
+    if client:
+        return client.get(f"/api/v1/{name}")
+    store = getattr(local_server.orchestrator, name)
+    return {k: v.model_dump() for k, v in store.items()}
+
+
+def _local_put_group(server, g: dict):
+    from ct.core.orchestrator import Group as G
+    from pydantic import TypeAdapter
+    server.orchestrator.groups[g["id"]] = TypeAdapter(G).validate_python(g)
+    return {"ok": g["id"]}
+
+
+def _local_put_scene(server, sid: str, body: dict):
+    from ct.core.orchestrator import Scene
+    server.orchestrator.scenes[sid] = Scene(id=sid, **body)
+    return {"ok": sid}
+
+
+def _local_put_schedule(server, sid: str, body: dict):
+    from ct.core.orchestrator import Schedule
+    server.orchestrator.schedules[sid] = Schedule(id=sid, **body)
+    return {"ok": sid}
 
 
 def _local_caller(server, admin: bool = True):
@@ -194,8 +333,111 @@ def _local_caller(server, admin: bool = True):
     return Caller(id="cli-local", role="admin" if admin else "user")
 
 
+# ------------------------- ОБЁРТКА ASCII-ЛОГГЕРА (REPL) -----------------------
+# Два режима, один интерфейс start/stop для handle_line("render on|off"):
+#  * --local: snapshot берётся напрямую из оркестратора (desired-IR + сегменты);
+#  * удалённый: периодический опрос GET /api/v1/render/snapshot (tokio-подобный
+#    фоновый task; requests блокирует только свой task, ввод не трогается).
+class RenderSnapshotSource:
+    def __init__(self, client=None, local_server=None):
+        self.client = client
+        self.server = local_server
+
+    def snapshot(self):
+        """-> list[(node, ir_or_None, seg_map)] — контракт FrameLogger.start."""
+        if self.server is not None:
+            reg, orch = self.server.registry, self.server.orchestrator
+            segs: dict = {}
+            for g in orch.groups.values():
+                segs.update(g.segments)
+            return [(node, orch.desired_ir(node.id), segs) for node in reg.all()]
+        # удалённый режим: сервер уже посчитал строки кадров; превращаем их
+        # в «готовые линии» через fake-node с нулевым IR нельзя — честнее
+        # переиспользовать lines как есть: оборачиваем строки псевдо-узлом.
+        data = self.client.get("/api/v1/render/snapshot")
+        out = []
+        for d in data.get("devices", []):
+            out.append(_RemoteLines(d["device"], d.get("lines", [])))
+        return out
+
+
+class _RemoteLines:
+    """Адаптер: готовый кадр сервера -> тот же протокол, что render_device_frame.
+
+    FrameLogger вызывает render_device_frame(node, ir, t, cfg, segs); для
+    удалённого режима мы подменяем snapshot_fn целиком (см. _make_logger),
+    поэтому этот класс нужен только чтобы не выдумывать узел-призрак.
+    """
+    def __init__(self, device_id: str, lines: list[str]):
+        self.id = device_id
+        self.lines = lines
+
+
+def _make_logger(client, local_server):
+    from ct.core.render import FrameLogger, RENDER_CONFIG
+    zone_h = CLI_CONFIG.get("render_zone_height", 24)
+    logger = FrameLogger(console, zone_height=zone_h)
+
+    src = RenderSnapshotSource(client=client, local_server=local_server)
+    if local_server is not None:
+        # локально: штатный цикл FrameLogger (общий тик wall-clock, стирание)
+        orig_start = logger.start
+
+        async def start_local(only_device=None):
+            await orig_start(src.snapshot, only_device=only_device)
+        logger.start = start_local  # type: ignore[assignment]
+        return logger
+
+    # удалённо: свой цикл с частотой из конфига и HTTP-опросом
+    async def start_remote(only_device=None):
+        if logger.enabled:
+            return
+        logger.only_device = only_device
+        logger.enabled = True
+
+        async def loop():
+            period = 1.0 / max(1.0, CLI_CONFIG.get("render_fps_remote", 5.0))
+            while logger.enabled:
+                lines: list[str] = []
+                try:
+                    data = src.snapshot()
+                    for item in data:
+                        if only_device and item.id != only_device:
+                            continue
+                        lines += item.lines
+                        lines.append("")
+                except Exception as e:
+                    lines = [f"\x1b[31mrender error: {e}\x1b[0m"]
+                logger.zone.draw(lines[: logger.zone.height + 8])
+                await asyncio.sleep(period)
+        logger._task = asyncio.create_task(loop())
+
+    async def stop():
+        logger.enabled = False
+        if logger._task:
+            logger._task.cancel()
+            try:
+                await logger._task
+            except asyncio.CancelledError:
+                pass
+            logger._task = None
+        logger.zone.erase()
+
+    logger.start = start_remote  # type: ignore[assignment]
+    logger.stop = stop           # type: ignore[assignment]
+    return logger
+
+
 async def repl_loop(client, local_server) -> None:
     console.print("[bold cyan]Chromatransposer CLI[/] (help — список команд)")
+    frame_logger = _make_logger(client, local_server)
+    try:
+        await _repl_inner(client, local_server, frame_logger)
+    finally:
+        await frame_logger.stop()
+
+
+async def _repl_inner(client, local_server, frame_logger) -> None:
     while True:
         try:
             line = console.input("[bold green]ct>[/] ")
@@ -207,7 +449,7 @@ async def repl_loop(client, local_server) -> None:
         if parts[0] in ("quit", "exit"):
             break
         try:
-            await handle_line(client, local_server, parts)
+            await handle_line(client, local_server, parts, frame_logger)
         except requests.HTTPError as e:
             console.print(f"[red]{e.response.status_code}: {e.response.text}[/]")
         except Exception as e:

@@ -27,14 +27,18 @@ class MqttBridge:
     """Мост к локальному брокеру с async-обёрткой поверх paho-потока."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 1883,
-                 client_id: str = "chromatransposer"):
+                 client_id: str = "chromatransposer", protocol: int = None):
         self.host, self.port = host, port
+        # MQTT 3.1.1: встроенный AMQTT-брокер не принимает v5 CONNECT
+        # (проверено на amqtt 0.12), а внешние брокеры 311 понимают все.
+        if protocol is None:
+            protocol = mqtt.MQTTv311
         # paho >= 2.x: единый CallbackAPIVersion.VERSION2
         try:
             self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                                       client_id=client_id, protocol=mqtt.MQTTv5)
+                                       client_id=client_id, protocol=protocol)
         except AttributeError:  # старый paho 1.x
-            self._client = mqtt.Client(client_id=client_id, protocol=mqtt.MQTTv5)
+            self._client = mqtt.Client(client_id=client_id, protocol=protocol)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._handlers: list[tuple[str, Callable[[str, dict], Awaitable[None]]]] = []
         self._connected = asyncio.Event()
@@ -69,6 +73,14 @@ class MqttBridge:
         await self._loop.run_in_executor(
             None, lambda: self._client.publish(
                 topic, json.dumps(payload), qos=qos, retain=retain))
+
+    async def publish_raw(self, topic: str, text: str, retain: bool = False,
+                          qos: int = 1) -> None:
+        """Сырой текстовый payload без JSON-обёртки. Нужен для экосистем,
+        чьи клиенты сверяют строку напрямую (Opera smart-home расширение:
+        base/switch.js ждёт ровно 'ON'/'OFF')."""
+        await self._loop.run_in_executor(
+            None, lambda: self._client.publish(topic, text, qos=qos, retain=retain))
 
     async def publish_lwt(self, topic: str) -> None:
         """Установить LWT: при обрыве связи сервера брокер опубликует offline."""

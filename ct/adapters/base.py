@@ -56,6 +56,14 @@ class SouthboundAdapter(abc.ABC):
     async def close(self) -> None:
         pass
 
+    # --- хук для HA-discovery-экспорта (северная сторона) ---
+    def ha_entity_policy(self) -> Optional[dict[str, Any]]:
+        """Что скрыть из UI HA (например Panic Button Opera GX — «чтобы не
+        прикалывались»). По умолчанию None: у адаптера нет политики, экспортёр
+        ничего не прячет. Возвращается dict: {"hidden": ["switch.panic_mode", ...],
+        "auto_off": {...}, "namespace": "..."}."""
+        return None
+
 
 class UnsupportedError(RuntimeError):
     """Цель не поддерживает класс эффекта — явный честный отказ."""

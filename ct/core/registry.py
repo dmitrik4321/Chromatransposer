@@ -20,6 +20,7 @@ class Ecosystem(str, Enum):
     GYVERLAMP2 = "gyverlamp2" # стоковая GyverLamp2: UDP «GL» (протокол описан smeleshkin/GyverLamp2HA)
     GENERIC = "generic"       # HTTP/MQTT/UDP + конфиг маппинга
     NATIVE_CT = "native_ct"   # собственная прошивка-IR-интерпретатор
+    OPERA = "opera"         # браузер Opera GX как устройство умного дома (CDP)
 
 
 class TransportKind(str, Enum):
@@ -49,6 +50,7 @@ class DeviceNode(BaseModel):
     name: str = ""
     ecosystem: Ecosystem
     adapter: str                          # имя класса адаптера ("wled", "gyverhub", ...)
+    device_type: str = ""                 # strip | matrix | tree; пусто -> classify() по топологии
     topology: Topology
     endpoints: list[Endpoint] = Field(default_factory=list)
     native_effects: list[NativeRef] = Field(default_factory=list)
@@ -77,6 +79,14 @@ class Registry:
 
     def upsert(self, node: DeviceNode) -> DeviceNode:
         self._devices[node.id] = node
+        # upsert не должен терять состояние живого узла: если у существующего
+        # узла уже есть last_seen (трафик шел), а новый пришёл «свежевылепленный»
+        # с нулём — берём максимум, иначе реконсиляция сочтёт его офлайном.
+        old = self._devices.get(node.id)
+        if old is not None and getattr(old, "last_seen", 0) > node.last_seen:
+            node.last_seen = old.last_seen
+            if old.online == OnlineState.ONLINE and node.online != OnlineState.ONLINE:
+                node.online = old.online
         self._notify(node.id)
         return node
 

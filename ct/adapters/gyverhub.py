@@ -24,15 +24,24 @@ from ct.core.registry import (DeviceNode, Endpoint, Ecosystem, OnlineState,
                               TransportKind)
 
 
+# ------------------------------ КОНФИГ АДАПТЕРА ------------------------------
+# Всё меняемое — здесь; переопределяется секцией adapters[].config в YAML.
+GYVERHUB_CONFIG = {
+    "retained_timeout_s": 3.0,   # ожидание retained-ответа на подписку
+}
+
+
 class GyverHubAdapter(SouthboundAdapter):
     name = "gyverhub"
     ecosystem = "gyverhub"
 
-    def __init__(self, devices: Optional[dict[str, dict]] = None, bridge=None):
+    def __init__(self, devices: Optional[dict[str, dict]] = None, bridge=None,
+                 config: Optional[dict] = None):
         """devices: {device_id: {"topic_map": {canon: topic},
                                 "avail_topic": "...", "topology": {...},
                                 "effects": [...], "http": "..."}}.
         topic_map строится из скетча GyverHub пользователя (имена виджетов)."""
+        self.cfg = {**GYVERHUB_CONFIG, **(config or {})}   # YAML поверх дефолтов
         self.devices_cfg = devices or {}
         self.bridge = bridge           # MqttBridge к ЛОКАЛЬНОМУ брокеру
         self._nodes: dict[str, DeviceNode] = {}
@@ -133,7 +142,7 @@ class GyverHubAdapter(SouthboundAdapter):
     def _topic_map(self, device_id: str) -> dict[str, str]:
         return dict(self.devices_cfg.get(device_id, {}).get("topic_map", {}))
 
-    async def _request(self, topic: str, timeout: float = 3.0) -> Optional[dict]:
+    async def _request(self, topic: str, timeout: Optional[float] = None) -> Optional[dict]:
         """Запрос состояния через retained-сообщение: подписка + ожидание."""
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
 
@@ -143,6 +152,7 @@ class GyverHubAdapter(SouthboundAdapter):
 
         self.bridge.on(topic, _once)
         try:
-            return await asyncio.wait_for(fut, timeout)
+            return await asyncio.wait_for(fut,
+                                          timeout or self.cfg["retained_timeout_s"])
         except asyncio.TimeoutError:
             return None

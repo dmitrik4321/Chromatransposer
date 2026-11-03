@@ -30,12 +30,20 @@ try:
 except ImportError:
     aiohttp = None
 
+# ------------------------------ КОНФИГ АДАПТЕРА ------------------------------
+# Всё меняемое — здесь; переопределяется секцией adapters[].config в YAML.
+GENERIC_CONFIG = {
+    "probe_timeout_s": 2.0,     # таймаут discovery-пробы «жив ли»
+    "poll_interval_s": 5.0,     # опрос состояния, если подписки нет
+}
+
 
 class GenericAdapter(SouthboundAdapter):
     name = "generic"
     ecosystem = "generic"
 
-    def __init__(self, configs: list[dict], bridge=None):
+    def __init__(self, configs: list[dict], bridge=None, config: Optional[dict] = None):
+        self.cfg = {**GENERIC_CONFIG, **(config or {})}   # YAML поверх дефолтов
         self.cfgs = {c["device_id"]: c for c in configs}
         self.bridge = bridge
         self._nodes: dict[str, DeviceNode] = {}
@@ -80,7 +88,8 @@ class GenericAdapter(SouthboundAdapter):
             try:
                 async with aiohttp.ClientSession() as s:
                     async with s.get(cfg["url"] + cfg.get("discovery", {}).get("probe_url", "/"),
-                                     timeout=aiohttp.ClientTimeout(2)):
+                                     timeout=aiohttp.ClientTimeout(
+                                         self.cfg["probe_timeout_s"])):
                         return True
             except Exception:
                 return False
@@ -165,5 +174,6 @@ class GenericAdapter(SouthboundAdapter):
                         await cb(await self.get_state(device_id))
                     except Exception:
                         pass
-                    await asyncio.sleep(cfg.get("poll_interval", 5))
+                    await asyncio.sleep(cfg.get("poll_interval",
+                                                self.cfg["poll_interval_s"]))
             asyncio.create_task(_poll())
