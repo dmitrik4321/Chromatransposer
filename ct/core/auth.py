@@ -132,6 +132,8 @@ class Provisioning:
                         for k, v in self._devices.items()},
             "tokens": {k: v.model_dump() for k, v in self._tokens.items()},
         }
+        # state_dir мог быть подменён после __init__ (тесты/конфиг) — создаём лениво
+        os.makedirs(self.state_dir, exist_ok=True)
         with open(self._path(), "w") as f:
             json.dump(data, f, indent=2)
 
