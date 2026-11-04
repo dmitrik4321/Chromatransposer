@@ -77,6 +77,20 @@ class EmbeddedBroker:
         await self._broker.start()
         self._started = True
 
+    def bound_bind(self) -> str:
+        """Фактический bind-адрес ('host:port'). Если в конфиге порт 0 (эфемерный),
+        возвращает порт, реально выданный ОС — чтобы клиент моста подключался туда же.
+        """
+        if not self._started or not getattr(self._broker, "_servers", None):
+            return self.cfg["bind"]
+        try:
+            srv = next(iter(self._broker._servers.values()))
+            sock = srv.instance.sockets[0]
+            host, port = sock.getsockname()[:2]
+            return f"{host}:{port}"
+        except (AttributeError, IndexError, OSError):
+            return self.cfg["bind"]
+
     async def stop(self) -> None:
         if self._broker is not None and self._started:
             try:

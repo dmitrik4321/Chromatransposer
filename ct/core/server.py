@@ -119,7 +119,7 @@ class Server:
         # (тесты/несколько инстансов могут использовать нестандартный порт)
         host, port = mqtt_cfg.get("host", "127.0.0.1"), mqtt_cfg.get("port", 1883)
         if self.broker.running:
-            bhost, _, bport = self.broker.cfg["bind"].rpartition(":")
+            bhost, _, bport = self.broker.bound_bind().rpartition(":")
             host, port = (bhost or "127.0.0.1"), int(bport)
         self.bridge = MqttBridge(host, port)
         await self.bridge.connect()
