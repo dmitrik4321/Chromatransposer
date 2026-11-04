@@ -22,16 +22,13 @@ ADMIN_SECRET = "test-admin-secret"
 # -----------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def srv(tmp_path, monkeypatch):
-    """Реальный Server с отключённой инфраструктурой + шпионский apply_fn.
+def _make_server(tmp_path, admin_secret: str):
+    """Реальный Server с отключённой инфраструктурой и конфигом native_ct-узлов.
 
-    apply перехватывается после start(): оркестратор вызывает self.apply,
-    поэтому подмена атрибута работает без правки ядра. sent[] даёт факты
-    «что реально ушло на юг» (state/segment), runs[] — число прогонов сцен.
+    Узлы e2e-a/e2e-b регистрируются через штатный путь: адаптер native_ct
+    стартует с devices-конфигом -> discover() кладёт их в реестр сам.
     """
     from ct.core.server import Server
-    monkeypatch.setenv("CT_ADMIN_SECRET", ADMIN_SECRET)
     server = Server(config_path="__missing__")          # конфига нет -> чистый SERVER_CONFIG
     server.config["homeassistant"] = {**server.config.get("homeassistant", {}),
                                       "mode": HA_MODE}
@@ -39,9 +36,26 @@ def srv(tmp_path, monkeypatch):
                              "broker": {"enabled": BROKER_ENABLED, "bind": "127.0.0.1:0"}}
     server.broker.cfg["bind"] = "127.0.0.1:0"
     server.config["state_dir"] = str(tmp_path / "state")
+    server.config["adapters"] = [{
+        "type": "native_ct",
+        "devices": {did: {"topology": {"kind": "strip", "length": 64}}
+                    for did in ("e2e-a", "e2e-b")},
+    }]
     server.provisioning.state_dir = str(tmp_path / "state")
+    server.provisioning.admin_secret = admin_secret     # детерминированные подписи в тесте
+    return server
 
+
+def _install_spy(server):
+    """Шпионский apply_fn: sent[] даёт факты «что реально ушло на юг».
+
+    Ставится ДО start(): оркестратор строится в __init__, но apply вызывается
+    только из команд, а конфиг адаптеров мы читаем уже в start(). Перехват на
+    уровне атрибута оркестратора не требует правки ядра.
+    """
     real_apply = server._apply
+    server.sent: list[dict] = []
+    server.runs: list[str] = []
 
     async def spy(device_id, state, segment, ir):
         r = await real_apply(device_id, state, segment, ir)
@@ -49,15 +63,7 @@ def srv(tmp_path, monkeypatch):
                             "seg": segment.model_dump() if segment else None})
         return r
 
-    server.sent: list[dict] = []
-    server.runs: list[str] = []
-    server._apply_spy = spy
-    yield server
-
-
-def _attach_spy(server):
-    """Вешаем шпиона на оркестратор (он хранит apply_fn своим полем)."""
-    server.orchestrator.apply = server._apply_spy
+    server.orchestrator.apply = spy
 
 
 def _headers(tok: str) -> dict:

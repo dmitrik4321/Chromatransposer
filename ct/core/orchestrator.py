@@ -165,6 +165,8 @@ class Orchestrator:
 
     # --- сцены / расписания ---------------------------------------------------
     async def run_scene(self, scene_id: str, caller: Caller) -> dict:
+        # KeyError -> 409 Conflict не должен маскироваться: вызывающий REST
+        # преобразует KeyError в 404 (см. rest_api.run_scene)
         scene = self.scenes[scene_id]
         applied = {}
         for step in scene.steps:
