@@ -22,11 +22,15 @@ ADMIN_SECRET = "test-admin-secret"
 # -----------------------------------------------------------------------------
 
 
-def _make_server(tmp_path, admin_secret: str):
-    """Реальный Server с отключённой инфраструктурой и конфигом native_ct-узлов.
+@pytest.fixture
+def srv(tmp_path):
+    """Реальный Server с отключённой инфраструктурой (HA mode=off, брокер на :0).
 
-    Узлы e2e-a/e2e-b регистрируются через штатный путь: адаптер native_ct
-    стартует с devices-конфигом -> discover() кладёт их в реестр сам.
+    Узлы e2e-a/e2e-b добираются до реестра штатным путём: фикстура подменяет
+    секцию adapters конфига на native_ct со списком devices, discovery в start()
+    вызывает adapter.discover(), а native_ct.discover() просто отдаёт то, что
+    написано в его config. Никакой записи в registry «сверху» — ровно тот же
+    путь, что у продакшена.
     """
     from ct.core.server import Server
     server = Server(config_path="__missing__")          # конфига нет -> чистый SERVER_CONFIG
@@ -34,28 +38,21 @@ def _make_server(tmp_path, admin_secret: str):
                                       "mode": HA_MODE}
     server.config["mqtt"] = {**server.config.get("mqtt", {}),
                              "broker": {"enabled": BROKER_ENABLED, "bind": "127.0.0.1:0"}}
-    server.broker.cfg["bind"] = "127.0.0.1:0"
+    server.broker.cfg["bind"] = "127.0.0.1:0"           # Broker.start читает cfg напрямую
     server.config["state_dir"] = str(tmp_path / "state")
+    # спеки адаптеров: ключи == именованные аргументы конструктора (см. ADAPTERS)
     server.config["adapters"] = [{
         "type": "native_ct",
         "devices": {did: {"topology": {"kind": "strip", "length": 64}}
                     for did in ("e2e-a", "e2e-b")},
     }]
     server.provisioning.state_dir = str(tmp_path / "state")
-    server.provisioning.admin_secret = admin_secret     # детерминированные подписи в тесте
-    return server
+    server.provisioning.admin_secret = ADMIN_SECRET     # детерминированные подписи в тесте
 
-
-def _install_spy(server):
-    """Шпионский apply_fn: sent[] даёт факты «что реально ушло на юг».
-
-    Ставится ДО start(): оркестратор строится в __init__, но apply вызывается
-    только из команд, а конфиг адаптеров мы читаем уже в start(). Перехват на
-    уровне атрибута оркестратора не требует правки ядра.
-    """
+    # Шпионский apply_fn: sent[] даёт факты «что реально ушло на юг».
+    # Перехват на уровне атрибута оркестратора не требует правки ядра.
     real_apply = server._apply
     server.sent: list[dict] = []
-    server.runs: list[str] = []
 
     async def spy(device_id, state, segment, ir):
         r = await real_apply(device_id, state, segment, ir)
@@ -64,6 +61,7 @@ def _install_spy(server):
         return r
 
     server.orchestrator.apply = spy
+    return server
 
 
 def _headers(tok: str) -> dict:
@@ -77,7 +75,6 @@ async def test_groups_scenes_schedules_via_rest(srv):
     rest_api.server = srv
     try:
         await srv.start()
-        _attach_spy(srv)
         # --- решение E: открыли окно раздачи токенов -> выдали -> закрыли
         srv.provisioning.open_tokens = True
         admin_tok = srv.provisioning.issue_token("boss", "admin", ADMIN_SECRET)
@@ -91,14 +88,9 @@ async def test_groups_scenes_schedules_via_rest(srv):
             ah = _headers(admin_tok.token)
             uh = _headers(user_tok.token)
 
-            # регистрация двух native_ct-узлов напрямую в реестр (discovery не тестируем)
-            from ct.core.ir import Topology
-            from ct.core.registry import DeviceNode, Ecosystem
-            for did in ("e2e-a", "e2e-b"):
-                srv.registry.upsert(DeviceNode(
-                    id=did, ecosystem=Ecosystem.NATIVE_CT, adapter="native_ct",
-                    topology=Topology(kind="strip", length=64),
-                    supports_ir=True, supports_segments=True))
+            # discovery должен был сам положить native_ct-узлы в реестр
+            assert {"e2e-a", "e2e-b"} <= {d.id for d in srv.registry.all()}, \
+                [d.id for d in srv.registry.all()]
 
             # 1) группа из двух узлов — топологию определяет только админ
             r = await client.post(f"{API_PREFIX}/groups", headers=uh, json={

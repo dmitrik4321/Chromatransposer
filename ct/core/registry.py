@@ -78,7 +78,6 @@ class Registry:
         self._listeners: list = []
 
     def upsert(self, node: DeviceNode) -> DeviceNode:
-        self._devices[node.id] = node
         # upsert не должен терять состояние живого узла: если у существующего
         # узла уже есть last_seen (трафик шел), а новый пришёл «свежевылепленный»
         # с нулём — берём максимум, иначе реконсиляция сочтёт его офлайном.
@@ -87,6 +86,7 @@ class Registry:
             node.last_seen = old.last_seen
             if old.online == OnlineState.ONLINE and node.online != OnlineState.ONLINE:
                 node.online = old.online
+        self._devices[node.id] = node
         self._notify(node.id)
         return node
 
